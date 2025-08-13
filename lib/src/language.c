@@ -129,7 +129,7 @@ TSSymbolMetadata ts_language_symbol_metadata(
   if (symbol == ts_builtin_sym_error)  {
     return (TSSymbolMetadata) {.visible = true, .named = true};
   } else if (symbol == ts_builtin_sym_error_repeat) {
-    return (TSSymbolMetadata) {.visible = true, .named = false};
+    return (TSSymbolMetadata) {.visible = false, .named = false};
   } else {
     return self->symbol_metadata[symbol];
   }
@@ -291,4 +291,9 @@ TSSymbol ts_lookahead_iterator_current_symbol(const TSLookaheadIterator *self) {
 const char *ts_lookahead_iterator_current_symbol_name(const TSLookaheadIterator *self) {
   const LookaheadIterator *iterator = (const LookaheadIterator *)self;
   return ts_language_symbol_name(iterator->language, iterator->symbol);
+}
+
+bool ts_lookahead_iterator_has_actions(const TSLookaheadIterator *self) {
+  const LookaheadIterator *iterator = (const LookaheadIterator *)self;
+  return iterator->action_count != 0;
 }

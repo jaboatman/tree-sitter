@@ -2452,6 +2452,16 @@ impl LookaheadIterator {
         }
     }
 
+    /// Returns `true` if the current iteration has actions.
+    ///
+    /// This is useful for certain lookahead scenarios where you want to filter out symbols that
+    /// are only state transitions.
+    #[doc(alias = "ts_lookahead_iterator_has_actions")]
+    #[must_use]
+    pub fn has_actions(&self) -> bool {
+        unsafe { ffi::ts_lookahead_iterator_has_actions(self.0.as_ptr()) }
+    }
+
     /// Reset the lookahead iterator.
     ///
     /// This returns `true` if the language was set successfully and `false`
