@@ -883,6 +883,10 @@ extern "C" {
         self_: *const TSLookaheadIterator,
     ) -> *const ::core::ffi::c_char;
 }
+extern "C" {
+    #[doc = " Returns true if the current iteration has actions."]
+    pub fn ts_lookahead_iterator_has_actions(self_: *const TSLookaheadIterator) -> bool;
+}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct wasm_engine_t {

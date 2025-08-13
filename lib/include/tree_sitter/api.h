@@ -1367,6 +1367,11 @@ TSSymbol ts_lookahead_iterator_current_symbol(const TSLookaheadIterator *self);
 */
 const char *ts_lookahead_iterator_current_symbol_name(const TSLookaheadIterator *self);
 
+/**
+ * Returns true if the current iteration has actions.
+*/
+bool ts_lookahead_iterator_has_actions(const TSLookaheadIterator *self);
+
 /*************************************/
 /* Section - WebAssembly Integration */
 /************************************/
