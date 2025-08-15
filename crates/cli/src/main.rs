@@ -182,9 +182,16 @@ struct Parse {
     /// The source file(s) to use
     #[arg(num_args=1..)]
     pub paths: Option<Vec<PathBuf>>,
-    /// The path to the tree-sitter grammar directory
-    #[arg(long, short = 'p')]
+    /// The path to the tree-sitter grammar directory, implies --rebuild
+    #[arg(long, short = 'p', conflicts_with = "rebuild")]
     pub grammar_path: Option<PathBuf>,
+    /// The path to the parser's dynamic library
+    #[arg(long, short = 'l')]
+    pub lib_path: Option<PathBuf>,
+    /// If `--lib_path` is used, the name of the language used to extract the
+    /// library's language function
+    #[arg(long)]
+    pub lang_name: Option<String>,
     /// Select a language by the scope instead of a file extension
     #[arg(long)]
     pub scope: Option<String>,
@@ -273,9 +280,16 @@ struct Test {
     /// Only run corpus test cases from a given filename
     #[arg(long)]
     pub file_name: Option<String>,
-    /// The path to the tree-sitter grammar directory
-    #[arg(long, short = 'p')]
+    /// The path to the tree-sitter grammar directory, implies --rebuild
+    #[arg(long, short = 'p', conflicts_with = "rebuild")]
     pub grammar_path: Option<PathBuf>,
+    /// The path to the parser's dynamic library
+    #[arg(long, short = 'l')]
+    pub lib_path: Option<PathBuf>,
+    /// If `--lib_path` is used, the name of the language used to extract the
+    /// library's language function
+    #[arg(long)]
+    pub lang_name: Option<String>,
     /// Update all syntax trees in corpus files with current parser output
     #[arg(long, short)]
     pub update: bool,
@@ -332,9 +346,16 @@ struct Fuzz {
     /// Subdirectory to the language
     #[arg(long)]
     pub subdir: Option<PathBuf>,
-    /// The path to the tree-sitter grammar directory
-    #[arg(long, short = 'p')]
+    /// The path to the tree-sitter grammar directory, implies --rebuild
+    #[arg(long, short = 'p', conflicts_with = "rebuild")]
     pub grammar_path: Option<PathBuf>,
+    /// The path to the parser's dynamic library
+    #[arg(long)]
+    pub lib_path: Option<PathBuf>,
+    /// If `--lib_path` is used, the name of the language used to extract the
+    /// library's language function
+    #[arg(long)]
+    pub lang_name: Option<String>,
     /// Maximum number of edits to perform per fuzz test
     #[arg(long)]
     pub edits: Option<usize>,
@@ -364,9 +385,16 @@ struct Query {
     /// Path to a file with queries
     #[arg(index = 1, required = true)]
     query_path: PathBuf,
-    /// The path to the tree-sitter grammar directory
-    #[arg(long, short = 'p')]
+    /// The path to the tree-sitter grammar directory, implies --rebuild
+    #[arg(long, short = 'p', conflicts_with = "rebuild")]
     pub grammar_path: Option<PathBuf>,
+    /// The path to the parser's dynamic library
+    #[arg(long, short = 'l')]
+    pub lib_path: Option<PathBuf>,
+    /// If `--lib_path` is used, the name of the language used to extract the
+    /// library's language function
+    #[arg(long)]
+    pub lang_name: Option<String>,
     /// Measure execution time
     #[arg(long, short)]
     pub time: bool,
@@ -401,6 +429,9 @@ struct Query {
     #[arg(long, short = 'n')]
     #[clap(conflicts_with = "paths", conflicts_with = "paths_file")]
     pub test_number: Option<u32>,
+    /// Force rebuild the parser
+    #[arg(short, long)]
+    pub rebuild: bool,
 }
 
 #[derive(Args)]
@@ -436,8 +467,8 @@ struct Highlight {
     /// The source file(s) to use
     #[arg(num_args = 1..)]
     pub paths: Option<Vec<PathBuf>>,
-    /// The path to the tree-sitter grammar directory
-    #[arg(long, short = 'p')]
+    /// The path to the tree-sitter grammar directory, implies --rebuild
+    #[arg(long, short = 'p', conflicts_with = "rebuild")]
     pub grammar_path: Option<PathBuf>,
     /// The path to an alternative config.json file
     #[arg(long)]
@@ -446,6 +477,9 @@ struct Highlight {
     #[arg(long, short = 'n')]
     #[clap(conflicts_with = "paths", conflicts_with = "paths_file")]
     pub test_number: Option<u32>,
+    /// Force rebuild the parser
+    #[arg(short, long)]
+    pub rebuild: bool,
 }
 
 #[derive(Args)]
@@ -465,8 +499,8 @@ struct Tags {
     /// The source file(s) to use
     #[arg(num_args = 1..)]
     pub paths: Option<Vec<PathBuf>>,
-    /// The path to the tree-sitter grammar directory
-    #[arg(long, short = 'p')]
+    /// The path to the tree-sitter grammar directory, implies --rebuild
+    #[arg(long, short = 'p', conflicts_with = "rebuild")]
     pub grammar_path: Option<PathBuf>,
     /// The path to an alternative config.json file
     #[arg(long)]
@@ -475,6 +509,9 @@ struct Tags {
     #[arg(long, short = 'n')]
     #[clap(conflicts_with = "paths", conflicts_with = "paths_file")]
     pub test_number: Option<u32>,
+    /// Force rebuild the parser
+    #[arg(short, long)]
+    pub rebuild: bool,
 }
 
 #[derive(Args)]
@@ -948,7 +985,7 @@ impl Parse {
         let mut parser = Parser::new();
 
         loader.debug_build(self.debug_build);
-        loader.force_rebuild(self.rebuild);
+        loader.force_rebuild(self.rebuild || self.grammar_path.is_some());
 
         #[cfg(feature = "wasm")]
         if self.wasm {
@@ -1007,6 +1044,11 @@ impl Parse {
             has_error |= !parse_result.successful;
         };
 
+        if self.lib_path.is_none() && self.lang_name.is_some() {
+            eprintln!("Warning: --lang-name` specified without --lib-path. This argument will be ignored.");
+        }
+        let lib_info = get_lib_info(self.lib_path.as_ref(), self.lang_name.as_ref());
+
         let input = get_input(
             self.paths_file.as_deref(),
             self.paths,
@@ -1023,8 +1065,11 @@ impl Parse {
 
                 for path in &paths {
                     let path = Path::new(&path);
-                    let language =
-                        loader.select_language(path, current_dir, self.scope.as_deref())?;
+                    let language = loader
+                        .select_language(path, current_dir, self.scope.as_deref(), lib_info)
+                        .with_context(|| {
+                            anyhow!("Failed to load langauge for path \"{}\"", path.display())
+                        })?;
 
                     parse::parse_file_at_path(
                         &mut parser,
@@ -1045,16 +1090,29 @@ impl Parse {
             } => {
                 let path = get_tmp_source_file(&contents)?;
                 let languages = loader.languages_at_path(current_dir)?;
-                let language = languages
-                    .iter()
-                    .find(|(_, n)| language_names.contains(&Box::from(n.as_str())))
-                    .or_else(|| languages.first())
-                    .map(|(l, _)| l.clone())
-                    .ok_or_else(|| anyhow!("No language found"))?;
+
+                let language = if let Some(ref lib_path) = self.lib_path {
+                    let lib_info = get_lib_info(self.lib_path.as_ref(), self.lang_name.as_ref());
+                    &loader
+                        .select_language(lib_path, current_dir, None, lib_info)
+                        .with_context(|| {
+                            anyhow!(
+                                "Failed to load language for path \"{}\"",
+                                lib_path.display()
+                            )
+                        })?
+                } else {
+                    &languages
+                        .iter()
+                        .find(|(_, n)| language_names.contains(&Box::from(n.as_str())))
+                        .or_else(|| languages.first())
+                        .map(|(l, _)| l.clone())
+                        .ok_or_else(|| anyhow!("No language found"))?
+                };
 
                 parse::parse_file_at_path(
                     &mut parser,
-                    &language,
+                    language,
                     &path,
                     &name,
                     name.chars().count(),
@@ -1070,7 +1128,7 @@ impl Parse {
 
                 let path = get_tmp_source_file(&contents)?;
                 let name = "stdin";
-                let language = loader.select_language(&path, current_dir, None)?;
+                let language = loader.select_language(&path, current_dir, None, lib_info)?;
 
                 parse::parse_file_at_path(
                     &mut parser,
@@ -1107,7 +1165,7 @@ impl Test {
         let stat = self.stat.unwrap_or_default();
 
         loader.debug_build(self.debug_build);
-        loader.force_rebuild(self.rebuild);
+        loader.force_rebuild(self.rebuild || self.grammar_path.is_some());
 
         let mut parser = Parser::new();
 
@@ -1120,11 +1178,26 @@ impl Test {
             loader.use_wasm(&engine);
         }
 
+        if self.lib_path.is_none() && self.lang_name.is_some() {
+            eprintln!("Warning: --lang-name` specified without --lib-path. This argument will be ignored.");
+        }
         let languages = loader.languages_at_path(current_dir)?;
-        let language = &languages
-            .first()
-            .ok_or_else(|| anyhow!("No language found"))?
-            .0;
+        let language = if let Some(ref lib_path) = self.lib_path {
+            let lib_info = get_lib_info(self.lib_path.as_ref(), self.lang_name.as_ref());
+            &loader
+                .select_language(lib_path, current_dir, None, lib_info)
+                .with_context(|| {
+                    anyhow!(
+                        "Failed to load language for path \"{}\"",
+                        lib_path.display()
+                    )
+                })?
+        } else {
+            &languages
+                .first()
+                .ok_or_else(|| anyhow!("No language found"))?
+                .0
+        };
         parser.set_language(language)?;
 
         let test_dir = current_dir.join("test");
@@ -1248,12 +1321,31 @@ impl Version {
 impl Fuzz {
     fn run(self, mut loader: loader::Loader, current_dir: &Path) -> Result<()> {
         loader.sanitize_build(true);
-        loader.force_rebuild(self.rebuild);
+        loader.force_rebuild(self.rebuild || self.grammar_path.is_some());
 
+        if self.lib_path.is_none() && self.lang_name.is_some() {
+            eprintln!("Warning: --lang-name` specified without --lib-path. This argument will be ignored.");
+        }
         let languages = loader.languages_at_path(current_dir)?;
-        let (language, language_name) = &languages
-            .first()
-            .ok_or_else(|| anyhow!("No language found"))?;
+        let (language, language_name) = if let Some(ref lib_path) = self.lib_path {
+            let lib_info = get_lib_info(self.lib_path.as_ref(), self.lang_name.as_ref())
+                .with_context(|| anyhow!("No language name found for {}", lib_path.display()))?;
+            &(
+                loader
+                    .select_language(lib_path, current_dir, None, Some(lib_info))
+                    .with_context(|| {
+                        anyhow!(
+                            "Failed to load language for path \"{}\"",
+                            lib_path.display()
+                        )
+                    })?,
+                lib_info.1.to_string(),
+            )
+        } else {
+            languages
+                .first()
+                .ok_or_else(|| anyhow!("No language found"))?
+        };
 
         let mut fuzz_options = FuzzOptions {
             skipped: self.skip,
@@ -1281,6 +1373,7 @@ impl Query {
     fn run(self, mut loader: loader::Loader, current_dir: &Path) -> Result<()> {
         let config = Config::load(self.config_path)?;
         let loader_config = config.get()?;
+        loader.force_rebuild(self.rebuild || self.grammar_path.is_some());
         loader.find_all_languages(&loader_config)?;
         let query_path = Path::new(&self.query_path);
 
@@ -1299,6 +1392,13 @@ impl Query {
 
         let cancellation_flag = util::cancel_on_signal();
 
+        if self.lib_path.is_none() && self.lang_name.is_some() {
+            eprintln!(
+                "Warning: --lang-name specified without --lib-path. This argument will be ignored."
+            );
+        }
+        let lib_info = get_lib_info(self.lib_path.as_ref(), self.lang_name.as_ref());
+
         let input = get_input(
             self.paths_file.as_deref(),
             self.paths,
@@ -1312,6 +1412,7 @@ impl Query {
                     Path::new(&paths[0]),
                     current_dir,
                     self.scope.as_deref(),
+                    lib_info,
                 )?;
 
                 for path in paths {
@@ -1337,14 +1438,26 @@ impl Query {
             } => {
                 let path = get_tmp_source_file(&contents)?;
                 let languages = loader.languages_at_path(current_dir)?;
-                let language = languages
-                    .iter()
-                    .find(|(_, n)| language_names.contains(&Box::from(n.as_str())))
-                    .or_else(|| languages.first())
-                    .map(|(l, _)| l.clone())
-                    .ok_or_else(|| anyhow!("No language found"))?;
+                let language = if let Some(ref lib_path) = self.lib_path {
+                    let lib_info = get_lib_info(self.lib_path.as_ref(), self.lang_name.as_ref());
+                    &loader
+                        .select_language(lib_path, current_dir, None, lib_info)
+                        .with_context(|| {
+                            anyhow!(
+                                "Failed to load language for path \"{}\"",
+                                lib_path.display()
+                            )
+                        })?
+                } else {
+                    &languages
+                        .iter()
+                        .find(|(_, n)| language_names.contains(&Box::from(n.as_str())))
+                        .or_else(|| languages.first())
+                        .map(|(l, _)| l.clone())
+                        .ok_or_else(|| anyhow!("No language found"))?
+                };
                 query::query_file_at_path(
-                    &language,
+                    language,
                     &path,
                     &name,
                     query_path,
@@ -1363,7 +1476,7 @@ impl Query {
                 println!();
 
                 let path = get_tmp_source_file(&contents)?;
-                let language = loader.select_language(&path, current_dir, None)?;
+                let language = loader.select_language(&path, current_dir, None, lib_info)?;
                 query::query_file_at_path(
                     &language,
                     &path,
@@ -1392,6 +1505,7 @@ impl Highlight {
         loader.configure_highlights(&theme_config.theme.highlight_names);
         let loader_config = config.get()?;
         loader.find_all_languages(&loader_config)?;
+        loader.force_rebuild(self.rebuild || self.grammar_path.is_some());
 
         let cancellation_flag = util::cancel_on_signal();
 
@@ -1546,6 +1660,7 @@ impl Tags {
         let config = Config::load(self.config_path)?;
         let loader_config = config.get()?;
         loader.find_all_languages(&loader_config)?;
+        loader.force_rebuild(self.rebuild || self.grammar_path.is_some());
 
         let cancellation_flag = util::cancel_on_signal();
 
@@ -1688,6 +1803,7 @@ impl DumpLanguages {
         for (configuration, language_path) in loader.get_all_language_configurations() {
             println!(
                 concat!(
+                    "name: {}\n",
                     "scope: {}\n",
                     "parser: {:?}\n",
                     "highlights: {:?}\n",
@@ -1695,6 +1811,7 @@ impl DumpLanguages {
                     "content_regex: {:?}\n",
                     "injection_regex: {:?}\n",
                 ),
+                configuration.language_name,
                 configuration.scope.as_ref().unwrap_or(&String::new()),
                 language_path,
                 configuration.highlights_filenames,
@@ -1746,7 +1863,6 @@ fn run() -> Result<()> {
         || BUILD_VERSION.to_string(),
         |build_sha| format!("{BUILD_VERSION} ({build_sha})"),
     );
-    let version: &'static str = Box::leak(version.into_boxed_str());
 
     let cli = Command::new("tree-sitter")
         .help_template(
@@ -1838,4 +1954,25 @@ const fn get_styles() -> clap::builder::Styles {
                 .fg_color(Some(Color::Ansi(AnsiColor::Green))),
         )
         .placeholder(Style::new().fg_color(Some(Color::Ansi(AnsiColor::White))))
+}
+
+/// Utility to extract the shared library path and language function name from user-provided
+/// arguments if present.
+fn get_lib_info<'a>(
+    lib_path: Option<&'a PathBuf>,
+    language_name: Option<&'a String>,
+) -> Option<(&'a Path, &'a str)> {
+    if let Some(lib_path) = lib_path {
+        // Use the user-specified name if present, otherwise try to derive it from
+        // the lib path
+        match (
+            language_name.map(|s| s.as_str()),
+            lib_path.file_stem().and_then(|s| s.to_str()),
+        ) {
+            (Some(name), _) | (None, Some(name)) => Some((lib_path.as_path(), name)),
+            _ => None,
+        }
+    } else {
+        None
+    }
 }
