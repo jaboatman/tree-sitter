@@ -1,6 +1,5 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use anyhow::Result;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -30,6 +29,7 @@ pub struct VariableInfo {
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq, Default, PartialOrd, Ord)]
+#[cfg(feature = "load")]
 pub struct NodeInfoJSON {
     #[serde(rename = "type")]
     kind: String,
@@ -47,6 +47,7 @@ pub struct NodeInfoJSON {
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg(feature = "load")]
 pub struct NodeTypeJSON {
     #[serde(rename = "type")]
     kind: String,
@@ -54,6 +55,7 @@ pub struct NodeTypeJSON {
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg(feature = "load")]
 pub struct FieldInfoJSON {
     multiple: bool,
     required: bool,
@@ -67,6 +69,7 @@ pub struct ChildQuantity {
     multiple: bool,
 }
 
+#[cfg(feature = "load")]
 impl Default for FieldInfoJSON {
     fn default() -> Self {
         Self {
@@ -102,7 +105,7 @@ impl ChildQuantity {
         }
     }
 
-    fn append(&mut self, other: Self) {
+    const fn append(&mut self, other: Self) {
         if other.exists {
             if self.exists || other.multiple {
                 self.multiple = true;
@@ -114,7 +117,7 @@ impl ChildQuantity {
         }
     }
 
-    fn union(&mut self, other: Self) -> bool {
+    const fn union(&mut self, other: Self) -> bool {
         let mut result = false;
         if !self.exists && other.exists {
             result = true;
@@ -374,11 +377,11 @@ pub fn get_variable_info(
 fn get_aliases_by_symbol(
     syntax_grammar: &SyntaxGrammar,
     default_aliases: &AliasMap,
-) -> HashMap<Symbol, HashSet<Option<Alias>>> {
+) -> HashMap<Symbol, BTreeSet<Option<Alias>>> {
     let mut aliases_by_symbol = HashMap::new();
     for (symbol, alias) in default_aliases {
         aliases_by_symbol.insert(*symbol, {
-            let mut aliases = HashSet::new();
+            let mut aliases = BTreeSet::new();
             aliases.insert(Some(alias.clone()));
             aliases
         });
@@ -387,7 +390,7 @@ fn get_aliases_by_symbol(
         if !default_aliases.contains_key(extra_symbol) {
             aliases_by_symbol
                 .entry(*extra_symbol)
-                .or_insert_with(HashSet::new)
+                .or_insert_with(BTreeSet::new)
                 .insert(None);
         }
     }
@@ -396,7 +399,7 @@ fn get_aliases_by_symbol(
             for step in &production.steps {
                 aliases_by_symbol
                     .entry(step.symbol)
-                    .or_insert_with(HashSet::new)
+                    .or_insert_with(BTreeSet::new)
                     .insert(
                         step.alias
                             .as_ref()
@@ -441,6 +444,7 @@ pub fn get_supertype_symbol_map(
     supertype_symbol_map
 }
 
+#[cfg(feature = "load")]
 pub type SuperTypeCycleResult<T> = Result<T, SuperTypeCycleError>;
 
 #[derive(Debug, Error, Serialize)]
@@ -462,6 +466,7 @@ impl std::fmt::Display for SuperTypeCycleError {
     }
 }
 
+#[cfg(feature = "load")]
 pub fn generate_node_types_json(
     syntax_grammar: &SyntaxGrammar,
     lexical_grammar: &LexicalGrammar,
@@ -525,7 +530,7 @@ pub fn generate_node_types_json(
 
     let aliases_by_symbol = get_aliases_by_symbol(syntax_grammar, default_aliases);
 
-    let empty = HashSet::new();
+    let empty = BTreeSet::new();
     let extra_names = syntax_grammar
         .extra_symbols
         .iter()
@@ -584,7 +589,7 @@ pub fn generate_node_types_json(
         } else if !syntax_grammar.variables_to_inline.contains(&symbol) {
             // If a rule is aliased under multiple names, then its information
             // contributes to multiple entries in the final JSON.
-            for alias in aliases_by_symbol.get(&symbol).unwrap_or(&HashSet::new()) {
+            for alias in aliases_by_symbol.get(&symbol).unwrap_or(&BTreeSet::new()) {
                 let kind;
                 let is_named;
                 if let Some(alias) = alias {
@@ -778,11 +783,15 @@ pub fn generate_node_types_json(
                 a_is_leaf.cmp(&b_is_leaf)
             })
             .then_with(|| a.kind.cmp(&b.kind))
+            .then_with(|| a.named.cmp(&b.named))
+            .then_with(|| a.root.cmp(&b.root))
+            .then_with(|| a.extra.cmp(&b.extra))
     });
     result.dedup();
     Ok(result)
 }
 
+#[cfg(feature = "load")]
 fn process_supertypes(info: &mut FieldInfoJSON, subtype_map: &[(NodeTypeJSON, Vec<NodeTypeJSON>)]) {
     for (supertype, subtypes) in subtype_map {
         if info.types.contains(supertype) {
@@ -819,17 +828,17 @@ fn extend_sorted<'a, T>(vec: &mut Vec<T>, values: impl IntoIterator<Item = &'a T
 where
     T: 'a + Clone + Eq + Ord,
 {
-    values.into_iter().any(|value| {
+    values.into_iter().fold(false, |acc, value| {
         if let Err(i) = vec.binary_search(value) {
             vec.insert(i, value.clone());
             true
         } else {
-            false
+            acc
         }
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "load"))]
 mod tests {
     use super::*;
     use crate::{

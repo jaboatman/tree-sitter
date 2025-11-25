@@ -18,15 +18,12 @@ workspace = true
 anstyle.workspace = true
 anyhow.workspace = true
 bindgen = { version = "0.72.0" }
-cc.workspace = true
 clap.workspace = true
-git2.workspace = true
 indoc.workspace = true
-toml.workspace = true
 regex.workspace = true
+schemars.workspace = true
 semver.workspace = true
-serde.workspace = true
 serde_json.workspace = true
-ureq = "3.0.12"
+tree-sitter-cli = { path = "../cli/" }
 notify = "8.2.0"
 notify-debouncer-full = "0.6.0"

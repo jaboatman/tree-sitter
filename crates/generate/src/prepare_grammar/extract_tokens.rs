@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -153,7 +152,7 @@ pub(super) fn extract_tokens(
         }
     }
 
-    let mut external_tokens = Vec::new();
+    let mut external_tokens = Vec::with_capacity(grammar.external_tokens.len());
     for external_token in grammar.external_tokens {
         let rule = symbol_replacer.replace_symbols_in_rule(&external_token.rule);
         if let Rule::Symbol(symbol) = rule {
@@ -213,7 +212,12 @@ pub(super) fn extract_tokens(
             {
                 reserved_words.push(Symbol::terminal(index));
             } else {
-                let token_name = match &reserved_rule {
+                let rule = if let Rule::Metadata { rule, .. } = &reserved_rule {
+                    rule.as_ref()
+                } else {
+                    &reserved_rule
+                };
+                let token_name = match rule {
                     Rule::String(s) => s.clone(),
                     Rule::Pattern(p, _) => p.clone(),
                     _ => "unknown".to_string(),
@@ -586,14 +590,13 @@ mod test {
         ]);
         grammar.external_tokens = vec![Variable::named("rule_1", Rule::non_terminal(1))];
 
-        match extract_tokens(grammar) {
-            Err(e) => {
-                assert_eq!(e.to_string(), "Rule 'rule_1' cannot be used as both an external token and a non-terminal rule");
-            }
-            _ => {
-                panic!("Expected an error but got no error");
-            }
-        }
+        let result = extract_tokens(grammar);
+        assert!(result.is_err(), "Expected an error but got no error");
+        let err = result.err().unwrap();
+        assert_eq!(
+            err.to_string(),
+            "Rule 'rule_1' cannot be used as both an external token and a non-terminal rule"
+        );
     }
 
     #[test]

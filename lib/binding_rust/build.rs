@@ -2,6 +2,7 @@ use std::{env, fs, path::PathBuf};
 
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let target = env::var("TARGET").unwrap();
 
     #[cfg(feature = "bindgen")]
     generate_bindings(&out_dir);
@@ -26,6 +27,11 @@ fn main() {
     let include_path = manifest_path.join("include");
     let src_path = manifest_path.join("src");
     let wasm_path = src_path.join("wasm");
+
+    if target.starts_with("wasm32-unknown") {
+        configure_wasm_build(&mut config);
+    }
+
     for entry in fs::read_dir(&src_path).unwrap() {
         let entry = entry.unwrap();
         let path = src_path.join(entry.file_name());
@@ -43,11 +49,28 @@ fn main() {
         .include(&include_path)
         .define("_POSIX_C_SOURCE", "200112L")
         .define("_DEFAULT_SOURCE", None)
+        .define("_DARWIN_C_SOURCE", None)
         .warnings(false)
         .file(src_path.join("lib.c"))
         .compile("tree-sitter");
 
     println!("cargo:include={}", include_path.display());
+}
+
+fn configure_wasm_build(config: &mut cc::Build) {
+    let Ok(wasm_headers) = env::var("DEP_TREE_SITTER_LANGUAGE_WASM_HEADERS") else {
+        panic!("Environment variable DEP_TREE_SITTER_LANGUAGE_WASM_HEADERS must be set by the language crate");
+    };
+    let Ok(wasm_src) = env::var("DEP_TREE_SITTER_LANGUAGE_WASM_SRC").map(PathBuf::from) else {
+        panic!("Environment variable DEP_TREE_SITTER_LANGUAGE_WASM_SRC must be set by the language crate");
+    };
+
+    config.include(&wasm_headers);
+    config.files([
+        wasm_src.join("stdio.c"),
+        wasm_src.join("stdlib.c"),
+        wasm_src.join("string.c"),
+    ]);
 }
 
 #[cfg(feature = "bindgen")]

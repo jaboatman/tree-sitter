@@ -5,6 +5,7 @@ use std::{
     sync::LazyLock,
 };
 
+use log::{error, info};
 use rand::Rng;
 use regex::Regex;
 use tree_sitter::{Language, Parser};
@@ -24,7 +25,7 @@ use crate::{
         random::Rand,
     },
     parse::perform_edit,
-    test::{parse_tests, print_diff, print_diff_key, strip_sexp_fields, TestEntry},
+    test::{parse_tests, strip_sexp_fields, DiffKey, TestDiff, TestEntry},
 };
 
 pub static LOG_ENABLED: LazyLock<bool> = LazyLock::new(|| env::var("TREE_SITTER_LOG").is_ok());
@@ -62,7 +63,7 @@ pub fn new_seed() -> usize {
     int_env_var("TREE_SITTER_SEED").unwrap_or_else(|| {
         let mut rng = rand::thread_rng();
         let seed = rng.gen::<usize>();
-        eprintln!("Seed: {seed}");
+        info!("Seed: {seed}");
         seed
     })
 }
@@ -108,12 +109,12 @@ pub fn fuzz_language_corpus(
     let corpus_dir = grammar_dir.join(subdir).join("test").join("corpus");
 
     if !corpus_dir.exists() || !corpus_dir.is_dir() {
-        eprintln!("No corpus directory found, ensure that you have a `test/corpus` directory in your grammar directory with at least one test file.");
+        error!("No corpus directory found, ensure that you have a `test/corpus` directory in your grammar directory with at least one test file.");
         return;
     }
 
     if std::fs::read_dir(&corpus_dir).unwrap().count() == 0 {
-        eprintln!("No corpus files found in `test/corpus`, ensure that you have at least one test file in your corpus directory.");
+        error!("No corpus files found in `test/corpus`, ensure that you have at least one test file in your corpus directory.");
         return;
     }
 
@@ -149,7 +150,7 @@ pub fn fuzz_language_corpus(
     let dump_edits = env::var("TREE_SITTER_DUMP_EDITS").is_ok();
 
     if log_seed {
-        println!("  start seed: {start_seed}");
+        info!("  start seed: {start_seed}");
     }
 
     println!();
@@ -163,7 +164,7 @@ pub fn fuzz_language_corpus(
 
         println!("  {test_index}. {test_name}");
 
-        let passed = allocations::record(|| {
+        let passed = allocations::record_checked(|| {
             let mut log_session = None;
             let mut parser = get_parser(&mut log_session, "log.html");
             parser.set_language(language).unwrap();
@@ -182,8 +183,8 @@ pub fn fuzz_language_corpus(
 
             if actual_output != test.output {
                 println!("Incorrect initial parse for {test_name}");
-                print_diff_key();
-                print_diff(&actual_output, &test.output, true);
+                DiffKey::print();
+                println!("{}", TestDiff::new(&actual_output, &test.output));
                 println!();
                 return false;
             }
@@ -191,7 +192,7 @@ pub fn fuzz_language_corpus(
             true
         })
         .unwrap_or_else(|e| {
-            eprintln!("Error: {e}");
+            error!("{e}");
             false
         });
 
@@ -207,7 +208,7 @@ pub fn fuzz_language_corpus(
 
         for trial in 0..options.iterations {
             let seed = start_seed + trial;
-            let passed = allocations::record(|| {
+            let passed = allocations::record_checked(|| {
                 let mut rand = Rand::new(seed);
                 let mut log_session = None;
                 let mut parser = get_parser(&mut log_session, "log.html");
@@ -216,7 +217,7 @@ pub fn fuzz_language_corpus(
                 let mut input = test.input.clone();
 
                 if options.log_graphs {
-                    eprintln!("{}\n", String::from_utf8_lossy(&input));
+                    info!("{}\n", String::from_utf8_lossy(&input));
                 }
 
                 // Perform a random series of edits and reparse.
@@ -229,7 +230,7 @@ pub fn fuzz_language_corpus(
                 }
 
                 if log_seed {
-                    println!("   {test_index}.{trial:<2} seed: {seed}");
+                    info!("   {test_index}.{trial:<2} seed: {seed}");
                 }
 
                 if dump_edits {
@@ -243,7 +244,7 @@ pub fn fuzz_language_corpus(
                 }
 
                 if options.log_graphs {
-                    eprintln!("{}\n", String::from_utf8_lossy(&input));
+                    info!("{}\n", String::from_utf8_lossy(&input));
                 }
 
                 set_included_ranges(&mut parser, &input, test.template_delimiters);
@@ -252,7 +253,7 @@ pub fn fuzz_language_corpus(
                 // Check that the new tree is consistent.
                 check_consistent_sizes(&tree2, &input);
                 if let Err(message) = check_changed_ranges(&tree, &tree2, &input) {
-                    println!("\nUnexpected scope change in seed {seed} with start seed {start_seed}\n{message}\n\n",);
+                    error!("\nUnexpected scope change in seed {seed} with start seed {start_seed}\n{message}\n\n",);
                     return false;
                 }
 
@@ -261,7 +262,7 @@ pub fn fuzz_language_corpus(
                     perform_edit(&mut tree2, &mut input, &edit).unwrap();
                 }
                 if options.log_graphs {
-                    eprintln!("{}\n", String::from_utf8_lossy(&input));
+                    info!("{}\n", String::from_utf8_lossy(&input));
                 }
 
                 set_included_ranges(&mut parser, &test.input, test.template_delimiters);
@@ -275,8 +276,8 @@ pub fn fuzz_language_corpus(
 
                 if actual_output != test.output && !test.error {
                     println!("Incorrect parse for {test_name} - seed {seed}");
-                    print_diff_key();
-                    print_diff(&actual_output, &test.output, true);
+                    DiffKey::print();
+                    println!("{}", TestDiff::new(&actual_output, &test.output));
                     println!();
                     return false;
                 }
@@ -284,13 +285,13 @@ pub fn fuzz_language_corpus(
                 // Check that the edited tree is consistent.
                 check_consistent_sizes(&tree3, &input);
                 if let Err(message) = check_changed_ranges(&tree2, &tree3, &input) {
-                    println!("Unexpected scope change in seed {seed} with start seed {start_seed}\n{message}\n\n");
+                    error!("Unexpected scope change in seed {seed} with start seed {start_seed}\n{message}\n\n");
                     return false;
                 }
 
                 true
             }).unwrap_or_else(|e| {
-                eprintln!("Error: {e}");
+                error!("{e}");
                 false
             });
 
@@ -302,17 +303,17 @@ pub fn fuzz_language_corpus(
     }
 
     if failure_count != 0 {
-        eprintln!("{failure_count} {language_name} corpus tests failed fuzzing");
+        info!("{failure_count} {language_name} corpus tests failed fuzzing");
     }
 
     skipped.retain(|_, v| *v == 0);
 
     if !skipped.is_empty() {
-        println!("Non matchable skip definitions:");
+        info!("Non matchable skip definitions:");
         for k in skipped.keys() {
-            println!("  {k}");
+            info!("  {k}");
         }
-        panic!("Non matchable skip definitions needs to be removed");
+        panic!("Non matchable skip definitions need to be removed");
     }
 }
 

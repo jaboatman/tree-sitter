@@ -1,4 +1,4 @@
-use std::{env, fmt::Write, sync::LazyLock};
+use std::{env, fmt::Write, ops::ControlFlow, sync::LazyLock};
 
 use indoc::indoc;
 use rand::{prelude::StdRng, SeedableRng};
@@ -8,6 +8,7 @@ use tree_sitter::{
     QueryCursorOptions, QueryError, QueryErrorKind, QueryPredicate, QueryPredicateArg,
     QueryProperty, Range,
 };
+use tree_sitter_generate::load_grammar_file;
 use unindent::Unindent;
 
 use super::helpers::{
@@ -17,7 +18,10 @@ use super::helpers::{
 };
 use crate::tests::{
     generate_parser,
-    helpers::query_helpers::{collect_captures, collect_matches},
+    helpers::{
+        fixtures::get_test_fixture_language,
+        query_helpers::{collect_captures, collect_matches},
+    },
     ITERATION_COUNT,
 };
 
@@ -234,6 +238,20 @@ fn test_query_errors_on_invalid_syntax() {
             ]
             .join("\n")
         );
+        assert_eq!(
+            Query::new(&language, "(statement / export_statement)").unwrap_err(),
+            QueryError {
+                row: 0,
+                offset: 11,
+                column: 11,
+                kind: QueryErrorKind::Syntax,
+                message: [
+                    "(statement / export_statement)", //
+                    "           ^"
+                ]
+                .join("\n")
+            }
+        );
     });
 }
 
@@ -412,11 +430,11 @@ fn test_query_errors_on_impossible_patterns() {
             Err(QueryError {
                 kind: QueryErrorKind::Structure,
                 row: 0,
-                offset: 51,
-                column: 51,
+                offset: 37,
+                column: 37,
                 message: [
                     "(binary_expression left: (expression (identifier)) left: (expression (identifier)))",
-                    "                                                   ^",
+                    "                                     ^",
                 ]
                 .join("\n"),
             })
@@ -3000,6 +3018,61 @@ fn test_query_matches_with_deeply_nested_patterns_with_fields() {
 }
 
 #[test]
+fn test_query_matches_with_alternations_and_predicates() {
+    allocations::record(|| {
+        let language = get_language("java");
+        let query = Query::new(
+            &language,
+            "
+            (block
+                [
+                    (local_variable_declaration
+                        (variable_declarator
+                            (identifier) @def.a
+                            (string_literal) @lit.a
+                        )
+                    )
+                    (local_variable_declaration
+                        (variable_declarator
+                            (identifier) @def.b
+                            (null_literal) @lit.b
+                        )
+                    )
+                ]
+                (expression_statement
+                    (method_invocation [
+                        (argument_list
+                            (identifier) @ref.a
+                            (string_literal)
+                        )
+                        (argument_list
+                            (null_literal)
+                            (identifier) @ref.b
+                        )
+                    ])
+                )
+                (#eq? @def.a @ref.a )
+                (#eq? @def.b @ref.b )
+            )
+            ",
+        )
+        .unwrap();
+
+        assert_query_matches(
+            &language,
+            &query,
+            r#"
+            void test() {
+                int a = "foo";
+                f(null, b);
+            }
+            "#,
+            &[],
+        );
+    });
+}
+
+#[test]
 fn test_query_matches_with_indefinite_step_containing_no_captures() {
     allocations::record(|| {
         // This pattern depends on the field declarations within the
@@ -4128,12 +4201,9 @@ fn test_query_random() {
             let pattern = pattern_ast.to_string();
             let expected_matches = pattern_ast.matches_in_tree(&test_tree);
 
-            let query = match Query::new(&language, &pattern) {
-                Ok(query) => query,
-                Err(e) => {
-                    panic!("failed to build query for pattern {pattern} - {e}. seed: {seed}");
-                }
-            };
+            let query = Query::new(&language, &pattern).unwrap_or_else(|e| {
+                panic!("failed to build query for pattern {pattern}. seed: {seed}\n{e}")
+            });
             let mut actual_matches = Vec::new();
             let mut match_iter = cursor.matches(
                 &query,
@@ -4962,6 +5032,26 @@ fn test_query_quantified_captures() {
                 ("comment.documentation", "// quuz"),
             ],
         },
+        Row {
+            description: "multiple quantifiers should not hang query parsing",
+            language: get_language("c"),
+            code: indoc! {"
+            // foo
+            // bar
+            // baz
+        "},
+            pattern: r"
+                ((comment) ?+ @comment)
+            ",
+            // This should be identical to the `*` quantifier.
+            captures: &[
+                ("comment", "// foo"),
+                ("comment", "// foo"),
+                ("comment", "// foo"),
+                ("comment", "// bar"),
+                ("comment", "// baz"),
+            ],
+        },
     ];
 
     allocations::record(|| {
@@ -5388,8 +5478,13 @@ fn test_query_execution_with_timeout() {
             &query,
             tree.root_node(),
             source_code.as_bytes(),
-            QueryCursorOptions::new()
-                .progress_callback(&mut |_| start_time.elapsed().as_micros() > 1000),
+            QueryCursorOptions::new().progress_callback(&mut |_| {
+                if start_time.elapsed().as_micros() > 1000 {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            }),
         )
         .count();
     assert!(matches < 1000);
@@ -5652,4 +5747,159 @@ fn test_query_with_predicate_causing_oob_access() {
        path: (scoped_identifier (identifier) @_regex (#any-of? @_regex \"Regex\" \"RegexBuilder\") .))
      (#set! injection.language \"regex\"))";
     Query::new(&language, query).unwrap();
+}
+
+#[test]
+fn test_query_with_anonymous_error_node() {
+    let language = get_test_fixture_language("anonymous_error");
+    let mut parser = Parser::new();
+    parser.set_language(&language).unwrap();
+
+    let source = "ERROR";
+
+    let tree = parser.parse(source, None).unwrap();
+    let query = Query::new(
+        &language,
+        r#"
+          "ERROR" @error
+          (document "ERROR" @error)
+        "#,
+    )
+    .unwrap();
+    let mut cursor = QueryCursor::new();
+    let matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    let matches = collect_matches(matches, &query, source);
+
+    assert_eq!(
+        matches,
+        vec![(1, vec![("error", "ERROR")]), (0, vec![("error", "ERROR")])]
+    );
+}
+
+#[test]
+fn test_query_allows_error_nodes_with_children() {
+    allocations::record(|| {
+        let language = get_language("cpp");
+
+        let code = "SomeStruct foo{.bar{}};";
+
+        let mut parser = Parser::new();
+        parser.set_language(&language).unwrap();
+
+        let tree = parser.parse(code, None).unwrap();
+        let root = tree.root_node();
+
+        let query = Query::new(&language, "(initializer_list (ERROR) @error)").unwrap();
+        let mut cursor = QueryCursor::new();
+
+        let matches = cursor.matches(&query, root, code.as_bytes());
+        let matches = collect_matches(matches, &query, code);
+        assert_eq!(matches, &[(0, vec![("error", ".bar")])]);
+    });
+}
+
+#[test]
+fn test_query_assertion_on_unreachable_node_with_child() {
+    // The `await_binding` rule is unreachable because it has a lower precedence than
+    // `identifier`, so we'll always reduce to an expression of type `identifier`
+    // instead whenever we see the token `await` followed by an identifier.
+    //
+    // A query that tries to capture the `await` token in the `await_binding` rule
+    // should not cause an assertion failure during query analysis.
+    let grammar = r#"
+export default grammar({
+  name: "query_assertion_crash",
+
+  rules: {
+    source_file: $ => repeat($.expression),
+
+    expression: $ => choice(
+      $.await_binding,
+      $.await_expr,
+      $.equal_expr,
+      prec(3, $.identifier),
+    ),
+
+    await_binding: $ => prec(1, seq('await', $.identifier, '=', $.expression)),
+
+    await_expr: $ => prec(1, seq('await', $.expression)),
+
+    equal_expr: $ => prec.right(2, seq($.expression, '=', $.expression)),
+
+    identifier: _ => /[a-z]+/,
+  }
+});
+    "#;
+
+    let file = tempfile::NamedTempFile::with_suffix(".js").unwrap();
+    std::fs::write(file.path(), grammar).unwrap();
+
+    let grammar_json = load_grammar_file(file.path(), None).unwrap();
+
+    let (parser_name, parser_code) = generate_parser(&grammar_json).unwrap();
+
+    let language = get_test_language(&parser_name, &parser_code, None);
+
+    let query_result = Query::new(&language, r#"(await_binding "await")"#);
+
+    assert!(query_result.is_err());
+    assert_eq!(
+        query_result.unwrap_err(),
+        QueryError {
+            kind: QueryErrorKind::Structure,
+            row: 0,
+            offset: 0,
+            column: 0,
+            message: ["(await_binding \"await\")", "^"].join("\n"),
+        }
+    );
+}
+
+#[test]
+fn test_query_supertype_with_anonymous_node() {
+    let grammar = r#"
+export default grammar({
+  name: "supertype_anonymous_test",
+
+  extras: $ => [/\s/, $.comment],
+
+  supertypes: $ => [$.expression],
+
+  word: $ => $.identifier,
+
+  rules: {
+    source_file: $ => repeat($.expression),
+
+    expression: $ => choice(
+      $.function_call,
+      '()' // an empty tuple, which should be queryable with the supertype syntax
+    ),
+
+    function_call: $ => seq($.identifier, '()'),
+
+    identifier: _ => /[a-zA-Z_][a-zA-Z0-9_]*/,
+
+    comment: _ => token(seq('//', /.*/)),
+  }
+});
+    "#;
+
+    let file = tempfile::NamedTempFile::with_suffix(".js").unwrap();
+    std::fs::write(file.path(), grammar).unwrap();
+
+    let grammar_json = load_grammar_file(file.path(), None).unwrap();
+
+    let (parser_name, parser_code) = generate_parser(&grammar_json).unwrap();
+
+    let language = get_test_language(&parser_name, &parser_code, None);
+
+    let query_result = Query::new(&language, r#"(expression/"()") @tuple"#);
+
+    assert!(query_result.is_ok());
+
+    let query = query_result.unwrap();
+
+    let source = "foo()\n()";
+
+    assert_query_matches(&language, &query, source, &[(0, vec![("tuple", "()")])]);
 }

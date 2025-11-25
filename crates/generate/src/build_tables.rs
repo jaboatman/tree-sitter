@@ -11,7 +11,7 @@ use std::collections::{BTreeSet, HashMap};
 pub use build_lex_table::LARGE_CHARACTER_RANGE_COUNT;
 use build_parse_table::BuildTableResult;
 pub use build_parse_table::ParseTableBuilderError;
-use log::info;
+use log::{debug, info};
 
 use self::{
     build_lex_table::build_lex_table,
@@ -27,6 +27,7 @@ use crate::{
     node_types::VariableInfo,
     rules::{AliasMap, Symbol, SymbolType, TokenSet},
     tables::{LexTable, ParseAction, ParseTable, ParseTableEntry},
+    OptLevel,
 };
 
 pub struct Tables {
@@ -43,6 +44,7 @@ pub fn build_tables(
     variable_info: &[VariableInfo],
     inlines: &InlinedProductionMap,
     report_symbol_name: Option<&str>,
+    optimizations: OptLevel,
 ) -> BuildTableResult<Tables> {
     let item_set_builder = ParseItemSetBuilder::new(syntax_grammar, lexical_grammar, inlines);
     let following_tokens =
@@ -78,6 +80,7 @@ pub fn build_tables(
         simple_aliases,
         &token_conflict_map,
         &keywords,
+        optimizations,
     );
     let lex_tables = build_lex_table(
         &mut parse_table,
@@ -98,6 +101,10 @@ pub fn build_tables(
             &parse_state_info,
             report_symbol_name,
         );
+    }
+
+    if parse_table.states.len() > u16::MAX as usize {
+        Err(ParseTableBuilderError::StateCount(parse_table.states.len()))?;
     }
 
     Ok(Tables {
@@ -172,7 +179,7 @@ fn populate_error_state(
             if conflicts_with_other_tokens {
                 None
             } else {
-                info!(
+                debug!(
                     "error recovery - token {} has no conflicts",
                     lexical_grammar.variables[i].name
                 );
@@ -198,14 +205,14 @@ fn populate_error_state(
                 !coincident_token_index.contains(symbol, *t)
                     && token_conflict_map.does_conflict(symbol.index, t.index)
             }) {
-                info!(
+                debug!(
                     "error recovery - exclude token {} because of conflict with {}",
                     lexical_grammar.variables[i].name, lexical_grammar.variables[t.index].name
                 );
                 continue;
             }
         }
-        info!(
+        debug!(
             "error recovery - include token {}",
             lexical_grammar.variables[i].name
         );
@@ -338,7 +345,7 @@ fn identify_keywords(
                 && token_conflict_map.does_match_same_string(i, word_token.index)
                 && !token_conflict_map.does_match_different_string(i, word_token.index)
             {
-                info!(
+                debug!(
                     "Keywords - add candidate {}",
                     lexical_grammar.variables[i].name
                 );
@@ -357,7 +364,7 @@ fn identify_keywords(
                 if other_token != *token
                     && token_conflict_map.does_match_same_string(other_token.index, token.index)
                 {
-                    info!(
+                    debug!(
                         "Keywords - exclude {} because it matches the same string as {}",
                         lexical_grammar.variables[token.index].name,
                         lexical_grammar.variables[other_token.index].name
@@ -399,7 +406,7 @@ fn identify_keywords(
                     word_token.index,
                     other_index,
                 ) {
-                    info!(
+                    debug!(
                         "Keywords - exclude {} because of conflict with {}",
                         lexical_grammar.variables[token.index].name,
                         lexical_grammar.variables[other_index].name
@@ -408,7 +415,7 @@ fn identify_keywords(
                 }
             }
 
-            info!(
+            debug!(
                 "Keywords - include {}",
                 lexical_grammar.variables[token.index].name,
             );
@@ -480,14 +487,14 @@ fn report_state_info<'a>(
         .max()
         .unwrap();
     for (symbol, states) in &symbols_with_state_indices {
-        eprintln!(
+        info!(
             "{:width$}\t{}",
             syntax_grammar.variables[symbol.index].name,
             states.len(),
             width = max_symbol_name_length
         );
     }
-    eprintln!();
+    info!("");
 
     let state_indices = if report_symbol_name == "*" {
         Some(&all_state_indices)
@@ -510,20 +517,25 @@ fn report_state_info<'a>(
         for state_index in state_indices {
             let id = parse_table.states[state_index].id;
             let (preceding_symbols, item_set) = &parse_state_info[id];
-            eprintln!("state index: {state_index}");
-            eprintln!("state id: {id}");
-            eprint!("symbol sequence:");
-            for symbol in preceding_symbols {
-                let name = if symbol.is_terminal() {
-                    &lexical_grammar.variables[symbol.index].name
-                } else if symbol.is_external() {
-                    &syntax_grammar.external_tokens[symbol.index].name
-                } else {
-                    &syntax_grammar.variables[symbol.index].name
-                };
-                eprint!(" {name}");
-            }
-            eprintln!(
+            info!("state index: {state_index}");
+            info!("state id: {id}");
+            info!(
+                "symbol sequence: {}",
+                preceding_symbols
+                    .iter()
+                    .map(|symbol| {
+                        if symbol.is_terminal() {
+                            lexical_grammar.variables[symbol.index].name.clone()
+                        } else if symbol.is_external() {
+                            syntax_grammar.external_tokens[symbol.index].name.clone()
+                        } else {
+                            syntax_grammar.variables[symbol.index].name.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            info!(
                 "\nitems:\n{}",
                 item::ParseItemSetDisplay(item_set, syntax_grammar, lexical_grammar),
             );

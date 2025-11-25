@@ -20,10 +20,10 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           path: artifacts
 
@@ -61,7 +61,7 @@ jobs:
     needs: release
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -78,13 +78,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        directory: [cli/npm, lib/binding_web]
+        directory: [crates/cli/npm, lib/binding_web]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
@@ -101,6 +101,7 @@ jobs:
           npm run build:debug
           CJS=true npm run build
           CJS=true npm run build:debug
+          npm run build:dts
 
       - name: Publish to npmjs.com
         working-directory: ${{ matrix.directory }}

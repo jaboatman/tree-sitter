@@ -1,6 +1,7 @@
 use std::{
     fmt, fs,
     io::{self, Write},
+    ops::ControlFlow,
     path::{Path, PathBuf},
     sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
@@ -9,16 +10,17 @@ use std::{
 use anstyle::{AnsiColor, Color, RgbColor};
 use anyhow::{anyhow, Context, Result};
 use clap::ValueEnum;
+use log::info;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tree_sitter::{
     ffi, InputEdit, Language, LogType, ParseOptions, ParseState, Parser, Point, Range, Tree,
     TreeCursor,
 };
 
-use super::util;
-use crate::{fuzz::edits::Edit, test::paint};
+use crate::{fuzz::edits::Edit, logger::paint, util};
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Serialize, JsonSchema)]
 pub struct Stats {
     pub successful_parses: usize,
     pub total_parses: usize,
@@ -229,10 +231,21 @@ impl ParseSummary {
     }
 }
 
-#[derive(Serialize, Debug, Default)]
+#[derive(Serialize, Debug)]
 pub struct ParseStats {
     pub parse_summaries: Vec<ParseSummary>,
     pub cumulative_stats: Stats,
+    pub source_count: usize,
+}
+
+impl Default for ParseStats {
+    fn default() -> Self {
+        Self {
+            parse_summaries: Vec::new(),
+            cumulative_stats: Stats::default(),
+            source_count: 1,
+        }
+    }
 }
 
 #[derive(Serialize, ValueEnum, Debug, Copy, Clone, Default, Eq, PartialEq)]
@@ -357,15 +370,15 @@ pub fn parse_file_at_path(
     let progress_callback = &mut |_: &ParseState| {
         if let Some(cancellation_flag) = opts.cancellation_flag {
             if cancellation_flag.load(Ordering::SeqCst) != 0 {
-                return true;
+                return ControlFlow::Break(());
             }
         }
 
         if opts.timeout > 0 && start_time.elapsed().as_micros() > opts.timeout as u128 {
-            return true;
+            return ControlFlow::Break(());
         }
 
-        false
+        ControlFlow::Continue(())
     };
 
     let parse_opts = ParseOptions::new().progress_callback(progress_callback);
@@ -424,7 +437,7 @@ pub fn parse_file_at_path(
 
     if let Some(mut tree) = tree {
         if opts.debug_graph && !opts.edits.is_empty() {
-            println!("BEFORE:\n{}", String::from_utf8_lossy(&source_code));
+            info!("BEFORE:\n{}", String::from_utf8_lossy(&source_code));
         }
 
         let edit_time = Instant::now();
@@ -434,7 +447,7 @@ pub fn parse_file_at_path(
             tree = parser.parse(&source_code, Some(&tree)).unwrap();
 
             if opts.debug_graph {
-                println!("AFTER {i}:\n{}", String::from_utf8_lossy(&source_code));
+                info!("AFTER {i}:\n{}", String::from_utf8_lossy(&source_code));
             }
         }
         let edit_duration = edit_time.elapsed();
@@ -507,11 +520,18 @@ pub fn parse_file_at_path(
 
         if opts.output == ParseOutput::Xml {
             let mut needs_newline = false;
-            let mut indent_level = 0;
+            let mut indent_level = 2;
             let mut did_visit_children = false;
             let mut had_named_children = false;
             let mut tags = Vec::<&str>::new();
-            writeln!(&mut stdout, "<?xml version=\"1.0\"?>")?;
+
+            // If we're parsing the first file, write the header
+            if opts.stats.parse_summaries.is_empty() {
+                writeln!(&mut stdout, "<?xml version=\"1.0\"?>")?;
+                writeln!(&mut stdout, "<sources>")?;
+            }
+            writeln!(&mut stdout, "  <source name=\"{}\">", path.display())?;
+
             loop {
                 let node = cursor.node();
                 let is_named = node.is_named();
@@ -590,8 +610,14 @@ pub fn parse_file_at_path(
                     }
                 }
             }
+            writeln!(&mut stdout)?;
+            writeln!(&mut stdout, "  </source>")?;
+
+            // If we parsed the last file, write the closing tag for the `sources` header
+            if opts.stats.parse_summaries.len() == opts.stats.source_count - 1 {
+                writeln!(&mut stdout, "</sources>")?;
+            }
             cursor.reset(tree.root_node());
-            println!();
         }
 
         if opts.output == ParseOutput::Dot {
@@ -649,10 +675,9 @@ pub fn parse_file_at_path(
                 width = max_path_length
             )?;
             if let Some(node) = first_error {
-                let start = node.start_position();
-                let end = node.end_position();
-                let mut node_text = String::new();
-                for c in node.kind().chars() {
+                let node_kind = node.kind();
+                let mut node_text = String::with_capacity(node_kind.len());
+                for c in node_kind.chars() {
                     if let Some(escaped) = escape_invisible(c) {
                         node_text += escaped;
                     } else {
@@ -669,6 +694,9 @@ pub fn parse_file_at_path(
                 } else {
                     write!(&mut stdout, "{node_text}")?;
                 }
+
+                let start = node.start_position();
+                let end = node.end_position();
                 write!(
                     &mut stdout,
                     " [{}, {}] - [{}, {}])",

@@ -1,5 +1,6 @@
 use std::{collections::HashMap, env, fs};
 
+use anyhow::Context;
 use tree_sitter::Parser;
 use tree_sitter_proc_macro::test_with_seed;
 
@@ -15,7 +16,7 @@ use crate::{
         LOG_GRAPH_ENABLED, START_SEED,
     },
     parse::perform_edit,
-    test::{parse_tests, print_diff, print_diff_key, strip_sexp_fields},
+    test::{parse_tests, strip_sexp_fields, DiffKey, TestDiff},
     tests::{
         allocations,
         helpers::fixtures::{fixtures_dir, get_language, get_test_language, SCRATCH_BASE_DIR},
@@ -208,15 +209,14 @@ pub fn test_language_corpus(
 
             if actual_output != test.output {
                 println!("Incorrect initial parse for {test_name}");
-                print_diff_key();
-                print_diff(&actual_output, &test.output, true);
+                DiffKey::print();
+                println!("{}", TestDiff::new(&actual_output, &test.output));
                 println!();
                 return false;
             }
 
             true
-        })
-        .unwrap();
+        });
 
         if !passed {
             failure_count += 1;
@@ -297,8 +297,8 @@ pub fn test_language_corpus(
 
                 if actual_output != test.output {
                     println!("Incorrect parse for {test_name} - seed {seed}");
-                    print_diff_key();
-                    print_diff(&actual_output, &test.output, true);
+                    DiffKey::print();
+                    println!("{}", TestDiff::new(&actual_output, &test.output));
                     println!();
                     return false;
                 }
@@ -311,7 +311,7 @@ pub fn test_language_corpus(
                 }
 
                 true
-            }).unwrap();
+            });
 
             if !passed {
                 failure_count += 1;
@@ -363,7 +363,14 @@ fn test_feature_corpus_files() {
             grammar_path = test_path.join("grammar.json");
         }
         let error_message_path = test_path.join("expected_error.txt");
-        let grammar_json = tree_sitter_generate::load_grammar_file(&grammar_path, None).unwrap();
+        let grammar_json = tree_sitter_generate::load_grammar_file(&grammar_path, None)
+            .with_context(|| {
+                format!(
+                    "Could not load grammar file for test language '{language_name}' at {}",
+                    grammar_path.display()
+                )
+            })
+            .unwrap();
         let generate_result =
             tree_sitter_generate::generate_parser_for_grammar(&grammar_json, Some((0, 0, 0)));
 
@@ -381,7 +388,7 @@ fn test_feature_corpus_files() {
                 let actual_message = e.to_string().replace("\r\n", "\n");
                 if expected_message != actual_message {
                     eprintln!(
-                        "Unexpected error message.\n\nExpected:\n\n{expected_message}\nActual:\n\n{actual_message}\n",
+                        "Unexpected error message.\n\nExpected:\n\n`{expected_message}`\nActual:\n\n`{actual_message}`\n",
                     );
                     failure_count += 1;
                 }
@@ -421,13 +428,12 @@ fn test_feature_corpus_files() {
                     if actual_output == test.output {
                         true
                     } else {
-                        print_diff_key();
-                        print_diff(&actual_output, &test.output, true);
+                        DiffKey::print();
+                        print!("{}", TestDiff::new(&actual_output, &test.output));
                         println!();
                         false
                     }
-                })
-                .unwrap();
+                });
 
                 if !passed {
                     failure_count += 1;

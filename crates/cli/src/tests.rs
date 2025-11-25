@@ -1,11 +1,10 @@
-mod async_context_test;
+mod async_boundary_test;
 mod corpus_test;
 mod detect_language;
 mod helpers;
 mod highlight_test;
 mod language_test;
 mod node_test;
-mod parser_hang_test;
 mod parser_test;
 mod pathological_test;
 mod query_test;
@@ -26,6 +25,8 @@ pub use crate::fuzz::{
     random::Rand,
     ITERATION_COUNT,
 };
+
+pub use helpers::fixtures::get_language;
 
 /// This is a simple wrapper around [`tree_sitter_generate::generate_parser_for_grammar`], because
 /// our tests do not need to pass in a version number, only the grammar JSON.

@@ -1,15 +1,15 @@
 use std::collections::HashSet;
 
-use anyhow::Result;
+use log::warn;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-use super::{
-    grammars::{InputGrammar, PrecedenceEntry, Variable, VariableType},
+use crate::{
+    grammars::{InputGrammar, PrecedenceEntry, ReservedWordContext, Variable, VariableType},
     rules::{Precedence, Rule},
 };
-use crate::grammars::ReservedWordContext;
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
@@ -17,7 +17,7 @@ use crate::grammars::ReservedWordContext;
 #[allow(clippy::upper_case_acronyms)]
 enum RuleJSON {
     ALIAS {
-        content: Box<RuleJSON>,
+        content: Box<Self>,
         named: bool,
         value: String,
     },
@@ -33,46 +33,46 @@ enum RuleJSON {
         name: String,
     },
     CHOICE {
-        members: Vec<RuleJSON>,
+        members: Vec<Self>,
     },
     FIELD {
         name: String,
-        content: Box<RuleJSON>,
+        content: Box<Self>,
     },
     SEQ {
-        members: Vec<RuleJSON>,
+        members: Vec<Self>,
     },
     REPEAT {
-        content: Box<RuleJSON>,
+        content: Box<Self>,
     },
     REPEAT1 {
-        content: Box<RuleJSON>,
+        content: Box<Self>,
     },
     PREC_DYNAMIC {
         value: i32,
-        content: Box<RuleJSON>,
+        content: Box<Self>,
     },
     PREC_LEFT {
         value: PrecedenceValueJSON,
-        content: Box<RuleJSON>,
+        content: Box<Self>,
     },
     PREC_RIGHT {
         value: PrecedenceValueJSON,
-        content: Box<RuleJSON>,
+        content: Box<Self>,
     },
     PREC {
         value: PrecedenceValueJSON,
-        content: Box<RuleJSON>,
+        content: Box<Self>,
     },
     TOKEN {
-        content: Box<RuleJSON>,
+        content: Box<Self>,
     },
     IMMEDIATE_TOKEN {
-        content: Box<RuleJSON>,
+        content: Box<Self>,
     },
     RESERVED {
         context_name: String,
-        content: Box<RuleJSON>,
+        content: Box<Self>,
     },
 }
 
@@ -262,6 +262,33 @@ pub(crate) fn parse_grammar(input: &str) -> ParseGrammarResult<InputGrammar> {
             });
             continue;
         }
+
+        if extra_symbols
+            .iter()
+            .any(|r| rule_is_referenced(r, name, false))
+        {
+            let inner_rule = if let Rule::Metadata { rule, .. } = rule {
+                rule
+            } else {
+                rule
+            };
+            let matches_empty = match inner_rule {
+                Rule::String(rule_str) => rule_str.is_empty(),
+                Rule::Pattern(ref value, _) => Regex::new(value)
+                    .map(|reg| reg.is_match(""))
+                    .unwrap_or(false),
+                _ => false,
+            };
+            if matches_empty {
+                warn!(
+                    concat!(
+                        "Named extra rule `{}` matches the empty string. ",
+                        "Inline this to avoid infinite loops while parsing."
+                    ),
+                    name
+                );
+            }
+        }
         variables.push(Variable {
             name: name.clone(),
             kind: VariableType::Named,
@@ -320,7 +347,7 @@ fn parse_rule(json: RuleJSON, is_token: bool) -> ParseGrammarResult<Rule> {
                     } else {
                         // silently ignore unicode flags
                         if c != 'u' && c != 'v' {
-                            eprintln!("Warning: unsupported flag {c}");
+                            warn!("unsupported flag {c}");
                         }
                         false
                     }

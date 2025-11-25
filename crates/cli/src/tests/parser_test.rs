@@ -1,11 +1,17 @@
 use std::{
-    sync::atomic::{AtomicUsize, Ordering},
-    thread, time,
+    ops::ControlFlow,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
+    thread,
+    time::{self, Duration},
 };
 
 use tree_sitter::{
     Decode, IncludedRangesError, InputEdit, LogType, ParseOptions, ParseState, Parser, Point, Range,
 };
+use tree_sitter_generate::load_grammar_file;
 use tree_sitter_proc_macro::retry;
 
 use super::helpers::{
@@ -16,7 +22,11 @@ use super::helpers::{
 use crate::{
     fuzz::edits::Edit,
     parse::perform_edit,
-    tests::{generate_parser, helpers::fixtures::get_test_fixture_language, invert_edit},
+    tests::{
+        generate_parser,
+        helpers::fixtures::{fixtures_dir, get_test_fixture_language},
+        invert_edit,
+    },
 };
 
 #[test]
@@ -87,7 +97,6 @@ fn test_parsing_with_logging() {
 }
 
 #[test]
-#[cfg(unix)]
 fn test_parsing_with_debug_graph_enabled() {
     use std::io::{BufRead, BufReader, Seek};
 
@@ -699,7 +708,13 @@ fn test_parsing_on_multiple_threads() {
 fn test_parsing_cancelled_by_another_thread() {
     let cancellation_flag = std::sync::Arc::new(AtomicUsize::new(0));
     let flag = cancellation_flag.clone();
-    let callback = &mut |_: &ParseState| cancellation_flag.load(Ordering::SeqCst) != 0;
+    let callback = &mut |_: &ParseState| {
+        if cancellation_flag.load(Ordering::SeqCst) != 0 {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
 
     let mut parser = Parser::new();
     parser.set_language(&get_language("javascript")).unwrap();
@@ -764,9 +779,13 @@ fn test_parsing_with_a_timeout() {
             }
         },
         None,
-        Some(
-            ParseOptions::new().progress_callback(&mut |_| start_time.elapsed().as_micros() > 1000),
-        ),
+        Some(ParseOptions::new().progress_callback(&mut |_| {
+            if start_time.elapsed().as_micros() > 1000 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })),
     );
     assert!(tree.is_none());
     assert!(start_time.elapsed().as_micros() < 2000);
@@ -782,9 +801,13 @@ fn test_parsing_with_a_timeout() {
             }
         },
         None,
-        Some(
-            ParseOptions::new().progress_callback(&mut |_| start_time.elapsed().as_micros() > 5000),
-        ),
+        Some(ParseOptions::new().progress_callback(&mut |_| {
+            if start_time.elapsed().as_micros() > 5000 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })),
     );
     assert!(tree.is_none());
     assert!(start_time.elapsed().as_micros() > 100);
@@ -822,7 +845,13 @@ fn test_parsing_with_a_timeout_and_a_reset() {
             }
         },
         None,
-        Some(ParseOptions::new().progress_callback(&mut |_| start_time.elapsed().as_micros() > 5)),
+        Some(ParseOptions::new().progress_callback(&mut |_| {
+            if start_time.elapsed().as_micros() > 5 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })),
     );
     assert!(tree.is_none());
 
@@ -853,7 +882,13 @@ fn test_parsing_with_a_timeout_and_a_reset() {
             }
         },
         None,
-        Some(ParseOptions::new().progress_callback(&mut |_| start_time.elapsed().as_micros() > 5)),
+        Some(ParseOptions::new().progress_callback(&mut |_| {
+            if start_time.elapsed().as_micros() > 5 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })),
     );
     assert!(tree.is_none());
 
@@ -893,10 +928,13 @@ fn test_parsing_with_a_timeout_and_implicit_reset() {
                 }
             },
             None,
-            Some(
-                ParseOptions::new()
-                    .progress_callback(&mut |_| start_time.elapsed().as_micros() > 5),
-            ),
+            Some(ParseOptions::new().progress_callback(&mut |_| {
+                if start_time.elapsed().as_micros() > 5 {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })),
         );
         assert!(tree.is_none());
 
@@ -937,10 +975,13 @@ fn test_parsing_with_timeout_and_no_completion() {
                 }
             },
             None,
-            Some(
-                ParseOptions::new()
-                    .progress_callback(&mut |_| start_time.elapsed().as_micros() > 5),
-            ),
+            Some(ParseOptions::new().progress_callback(&mut |_| {
+                if start_time.elapsed().as_micros() > 5 {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })),
         );
         assert!(tree.is_none());
 
@@ -979,10 +1020,10 @@ fn test_parsing_with_timeout_during_balancing() {
                 // are in the balancing phase.
                 if state.current_byte_offset() != current_byte_offset {
                     current_byte_offset = state.current_byte_offset();
-                    false
+                    ControlFlow::Continue(())
                 } else {
                     in_balancing = true;
-                    true
+                    ControlFlow::Break(())
                 }
             })),
         );
@@ -1004,10 +1045,10 @@ fn test_parsing_with_timeout_during_balancing() {
             Some(ParseOptions::new().progress_callback(&mut |state| {
                 if state.current_byte_offset() != current_byte_offset {
                     current_byte_offset = state.current_byte_offset();
-                    false
+                    ControlFlow::Continue(())
                 } else {
                     in_balancing = true;
-                    true
+                    ControlFlow::Break(())
                 }
             })),
         );
@@ -1031,7 +1072,7 @@ fn test_parsing_with_timeout_during_balancing() {
                     // Because we've already finished parsing, we should only be resuming the
                     // balancing phase.
                     assert!(state.current_byte_offset() == current_byte_offset);
-                    false
+                    ControlFlow::Continue(())
                 })),
             )
             .unwrap();
@@ -1057,7 +1098,11 @@ fn test_parsing_with_timeout_when_error_detected() {
         None,
         Some(ParseOptions::new().progress_callback(&mut |state| {
             offset = state.current_byte_offset();
-            state.has_error()
+            if state.has_error() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
         })),
     );
 
@@ -1737,7 +1782,7 @@ fn test_parsing_by_halting_at_offset() {
             None,
             Some(ParseOptions::new().progress_callback(&mut |p| {
                 seen_byte_offsets.push(p.current_byte_offset());
-                false
+                ControlFlow::Continue(())
             })),
         )
         .unwrap();
@@ -2037,4 +2082,98 @@ const fn simple_range(start: usize, end: usize) -> Range {
 
 fn chunked_input<'a>(text: &'a str, size: usize) -> impl FnMut(usize, Point) -> &'a [u8] {
     move |offset, _| &text.as_bytes()[offset..text.len().min(offset + size)]
+}
+
+#[test]
+fn test_parse_options_reborrow() {
+    let mut parser = Parser::new();
+    parser.set_language(&get_language("rust")).unwrap();
+
+    let parse_count = AtomicUsize::new(0);
+
+    let mut callback = |_: &ParseState| {
+        parse_count.fetch_add(1, Ordering::SeqCst);
+        ControlFlow::Continue(())
+    };
+    let mut options = ParseOptions::new().progress_callback(&mut callback);
+
+    let text1 = "fn first() {}".repeat(20);
+    let text2 = "fn second() {}".repeat(20);
+
+    let tree1 = parser
+        .parse_with_options(
+            &mut |offset, _| {
+                if offset >= text1.len() {
+                    &[]
+                } else {
+                    &text1.as_bytes()[offset..]
+                }
+            },
+            None,
+            Some(options.reborrow()),
+        )
+        .unwrap();
+
+    assert_eq!(tree1.root_node().child(0).unwrap().kind(), "function_item");
+
+    let tree2 = parser
+        .parse_with_options(
+            &mut |offset, _| {
+                if offset >= text2.len() {
+                    &[]
+                } else {
+                    &text2.as_bytes()[offset..]
+                }
+            },
+            None,
+            Some(options.reborrow()),
+        )
+        .unwrap();
+
+    assert_eq!(tree2.root_node().child(0).unwrap().kind(), "function_item");
+
+    assert!(parse_count.load(Ordering::SeqCst) > 0);
+}
+
+#[test]
+fn test_grammar_that_should_hang_and_not_segfault() {
+    fn hang_test() {
+        let test_grammar_dir = fixtures_dir()
+            .join("test_grammars")
+            .join("get_col_should_hang_not_crash");
+
+        let grammar_json = load_grammar_file(&test_grammar_dir.join("grammar.js"), None)
+            .expect("Failed to load grammar file");
+
+        let (parser_name, parser_code) =
+            generate_parser(grammar_json.as_str()).expect("Failed to generate parser");
+
+        let language =
+            get_test_language(&parser_name, &parser_code, Some(test_grammar_dir.as_path()));
+
+        let mut parser = Parser::new();
+        parser
+            .set_language(&language)
+            .expect("Failed to set parser language");
+
+        let code_that_should_hang = "\nHello";
+
+        parser
+            .parse(code_that_should_hang, None)
+            .expect("Parse operation completed unexpectedly");
+    }
+
+    let timeout = Duration::from_millis(500);
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || tx.send(std::panic::catch_unwind(hang_test)));
+
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(())) => panic!("The test completed rather than hanging"),
+        Ok(Err(panic_info)) => panic!("The test panicked unexpectedly: {panic_info:?}"),
+        Err(mpsc::RecvTimeoutError::Timeout) => {} // Expected
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("The test thread disconnected unexpectedly")
+        }
+    }
 }

@@ -1,4 +1,4 @@
-#![doc = include_str!("../README.md")]
+#![cfg_attr(not(any(test, doctest)), doc = include_str!("../README.md"))]
 
 pub mod c_lib;
 use core::slice;
@@ -7,7 +7,8 @@ use std::{
     iter,
     marker::PhantomData,
     mem::{self, MaybeUninit},
-    ops, str,
+    ops::{self, ControlFlow},
+    str,
     sync::{
         atomic::{AtomicUsize, Ordering},
         LazyLock,
@@ -275,7 +276,7 @@ impl Highlighter {
         }
     }
 
-    pub fn parser(&mut self) -> &mut Parser {
+    pub const fn parser(&mut self) -> &mut Parser {
         &mut self.parser
     }
 
@@ -343,11 +344,13 @@ impl HighlightConfiguration {
         locals_query: &str,
     ) -> Result<Self, QueryError> {
         // Concatenate the query strings, keeping track of the start offset of each section.
-        let mut query_source = String::new();
+        let mut query_source = String::with_capacity(
+            injection_query.len() + locals_query.len() + highlights_query.len(),
+        );
         query_source.push_str(injection_query);
-        let locals_query_offset = query_source.len();
+        let locals_query_offset = injection_query.len();
         query_source.push_str(locals_query);
-        let highlights_query_offset = query_source.len();
+        let highlights_query_offset = injection_query.len() + locals_query.len();
         query_source.push_str(highlights_query);
 
         // Construct a single query by concatenating the three query strings, but record the
@@ -538,9 +541,13 @@ impl<'a> HighlightIterLayer<'a> {
                         None,
                         Some(ParseOptions::new().progress_callback(&mut |_| {
                             if let Some(cancellation_flag) = cancellation_flag {
-                                cancellation_flag.load(Ordering::SeqCst) != 0
+                                if cancellation_flag.load(Ordering::SeqCst) != 0 {
+                                    ControlFlow::Break(())
+                                } else {
+                                    ControlFlow::Continue(())
+                                }
                             } else {
-                                false
+                                ControlFlow::Continue(())
                             }
                         })),
                     )
@@ -1098,7 +1105,7 @@ impl HtmlRenderer {
         result
     }
 
-    pub fn set_carriage_return_highlight(&mut self, highlight: Option<Highlight>) {
+    pub const fn set_carriage_return_highlight(&mut self, highlight: Option<Highlight>) {
         self.carriage_return_highlight = highlight;
     }
 

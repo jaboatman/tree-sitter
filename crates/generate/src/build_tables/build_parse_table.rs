@@ -5,6 +5,7 @@ use std::{
 };
 
 use indexmap::{map::Entry, IndexMap};
+use log::warn;
 use rustc_hash::FxHasher;
 use serde::Serialize;
 use thiserror::Error;
@@ -76,9 +77,11 @@ pub enum ParseTableBuilderError {
         "The non-terminal rule `{0}` is used in a non-terminal `extra` rule, which is not allowed."
     )]
     ImproperNonTerminalExtra(String),
+    #[error("State count `{0}` exceeds the max value {max}.", max=u16::MAX)]
+    StateCount(usize),
 }
 
-#[derive(Default, Debug, Serialize)]
+#[derive(Default, Debug, Serialize, Error)]
 pub struct ConflictError {
     pub symbol_sequence: Vec<String>,
     pub conflicting_lookahead: String,
@@ -86,7 +89,7 @@ pub struct ConflictError {
     pub possible_resolutions: Vec<Resolution>,
 }
 
-#[derive(Default, Debug, Serialize)]
+#[derive(Default, Debug, Serialize, Error)]
 pub struct Interpretation {
     pub preceding_symbols: Vec<String>,
     pub variable_name: String,
@@ -105,7 +108,7 @@ pub enum Resolution {
     AddConflict { symbols: Vec<String> },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Error)]
 pub struct AmbiguousExtraError {
     pub parent_symbols: Vec<String>,
 }
@@ -235,9 +238,6 @@ impl std::fmt::Display for AmbiguousExtraError {
     }
 }
 
-impl std::error::Error for ConflictError {}
-impl std::error::Error for AmbiguousExtraError {}
-
 impl<'a> ParseTableBuilder<'a> {
     fn new(
         syntax_grammar: &'a SyntaxGrammar,
@@ -326,9 +326,10 @@ impl<'a> ParseTableBuilder<'a> {
                 ))?;
             }
 
-            self.non_terminal_extra_states
-                .push((terminal, self.parse_table.states.len()));
-            self.add_parse_state(&Vec::new(), &Vec::new(), item_set);
+            // Add the parse state, and *then* push the terminal and the state id into the
+            // list of nonterminal extra states
+            let state_id = self.add_parse_state(&Vec::new(), &Vec::new(), item_set);
+            self.non_terminal_extra_states.push((terminal, state_id));
         }
 
         while let Some(entry) = self.parse_state_queue.pop_front() {
@@ -345,17 +346,21 @@ impl<'a> ParseTableBuilder<'a> {
         }
 
         if !self.actual_conflicts.is_empty() {
-            println!("Warning: unnecessary conflicts");
-            for conflict in &self.actual_conflicts {
-                println!(
-                    "  {}",
-                    conflict
-                        .iter()
-                        .map(|symbol| format!("`{}`", self.symbol_name(symbol)))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
+            warn!(
+                "unnecessary conflicts:\n  {}",
+                &self
+                    .actual_conflicts
+                    .iter()
+                    .map(|conflict| {
+                        conflict
+                            .iter()
+                            .map(|symbol| format!("`{}`", self.symbol_name(symbol)))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            );
         }
 
         Ok((self.parse_table, self.parse_state_info_by_id))

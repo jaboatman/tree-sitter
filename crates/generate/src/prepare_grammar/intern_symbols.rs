@@ -1,4 +1,4 @@
-use anyhow::Result;
+use log::warn;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -132,7 +132,7 @@ impl Interner<'_> {
     fn intern_rule(&self, rule: &Rule, name: Option<&str>) -> InternSymbolsResult<Rule> {
         match rule {
             Rule::Choice(elements) => {
-                self.check_single(elements, name);
+                self.check_single(elements, name, "choice");
                 let mut result = Vec::with_capacity(elements.len());
                 for element in elements {
                     result.push(self.intern_rule(element, name)?);
@@ -140,7 +140,7 @@ impl Interner<'_> {
                 Ok(Rule::Choice(result))
             }
             Rule::Seq(elements) => {
-                self.check_single(elements, name);
+                self.check_single(elements, name, "seq");
                 let mut result = Vec::with_capacity(elements.len());
                 for element in elements {
                     result.push(self.intern_rule(element, name)?);
@@ -184,10 +184,10 @@ impl Interner<'_> {
 
     // In the case of a seq or choice rule of 1 element in a hidden rule, weird
     // inconsistent behavior with queries can occur. So we should warn the user about it.
-    fn check_single(&self, elements: &[Rule], name: Option<&str>) {
+    fn check_single(&self, elements: &[Rule], name: Option<&str>, kind: &str) {
         if elements.len() == 1 && matches!(elements[0], Rule::String(_) | Rule::Pattern(_, _)) {
-            eprintln!(
-                "Warning: rule {} contains a `seq` or `choice` rule with a single element. This is unnecessary.",
+            warn!(
+                "rule {} contains a `{kind}` rule with a single element. This is unnecessary.",
                 name.unwrap_or_default()
             );
         }
@@ -278,10 +278,9 @@ mod tests {
     fn test_grammar_with_undefined_symbols() {
         let result = intern_symbols(&build_grammar(vec![Variable::named("x", Rule::named("y"))]));
 
-        match result {
-            Err(e) => assert_eq!(e.to_string(), "Undefined symbol `y`"),
-            _ => panic!("Expected an error but got none"),
-        }
+        assert!(result.is_err(), "Expected an error but got none");
+        let e = result.err().unwrap();
+        assert_eq!(e.to_string(), "Undefined symbol `y`");
     }
 
     fn build_grammar(variables: Vec<Variable>) -> InputGrammar {

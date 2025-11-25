@@ -1,13 +1,12 @@
-use std::{fs, sync::LazyLock};
+use std::fs;
 
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{
-    wasmtime::Engine, Parser, Query, QueryCursor, WasmError, WasmErrorKind, WasmStore,
+use tree_sitter::{Parser, Query, QueryCursor, WasmError, WasmErrorKind, WasmStore};
+
+use crate::tests::helpers::{
+    allocations,
+    fixtures::{get_test_fixture_language_wasm, ENGINE, WASM_DIR},
 };
-
-use crate::tests::helpers::{allocations, fixtures::WASM_DIR};
-
-static ENGINE: LazyLock<Engine> = LazyLock::new(Engine::default);
 
 #[test]
 fn test_wasm_stdlib_symbols() {
@@ -93,6 +92,33 @@ fn test_load_wasm_javascript_language() {
 }
 
 #[test]
+fn test_load_wasm_python_language() {
+    allocations::record(|| {
+        let mut store = WasmStore::new(&ENGINE).unwrap();
+        let mut parser = Parser::new();
+        let wasm = fs::read(WASM_DIR.join("tree-sitter-python.wasm")).unwrap();
+        let language = store.load_language("python", &wasm).unwrap();
+        parser.set_wasm_store(store).unwrap();
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse("a = b\nc = d", None).unwrap();
+        assert_eq!(tree.root_node().to_sexp(), "(module (expression_statement (assignment left: (identifier) right: (identifier))) (expression_statement (assignment left: (identifier) right: (identifier))))");
+    });
+}
+
+#[test]
+fn test_load_fixture_language_wasm() {
+    allocations::record(|| {
+        let store = WasmStore::new(&ENGINE).unwrap();
+        let mut parser = Parser::new();
+        let language = get_test_fixture_language_wasm("epsilon_external_tokens");
+        parser.set_wasm_store(store).unwrap();
+        parser.set_language(&language).unwrap();
+        let tree = parser.parse("hello", None).unwrap();
+        assert_eq!(tree.root_node().to_sexp(), "(document (zero_width))");
+    });
+}
+
+#[test]
 fn test_load_multiple_wasm_languages() {
     allocations::record(|| {
         let mut store = WasmStore::new(&ENGINE).unwrap();
@@ -116,7 +142,7 @@ fn test_load_multiple_wasm_languages() {
         let mut query_cursor = QueryCursor::new();
 
         // First, parse with the store that originally loaded the languages.
-        // Then parse with a new parser and wasm store, so that the languages
+        // Then parse with a new parser and Wasm store, so that the languages
         // are added one-by-one, in between parses.
         for mut parser in [parser, parser2] {
             for _ in 0..2 {
@@ -226,7 +252,7 @@ fn test_load_wasm_errors() {
             store.load_language("rust", bad_wasm).unwrap_err(),
             WasmError {
                 kind: WasmErrorKind::Parse,
-                message: "failed to parse dylink section of wasm module".into(),
+                message: "failed to parse dylink section of Wasm module".into(),
             }
         );
 
