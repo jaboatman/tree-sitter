@@ -20,7 +20,7 @@ use tree_sitter_cli::{
         LOG_GRAPH_ENABLED, START_SEED,
     },
     highlight::{self, HighlightOptions},
-    init::{generate_grammar_files, JsonConfigOpts},
+    init::{generate_grammar_files, JsonConfigOpts, TREE_SITTER_JSON_SCHEMA},
     input::{get_input, get_tmp_source_file, CliInput},
     logger,
     parse::{self, ParseDebugType, ParseFileOptions, ParseOutput, ParseTheme},
@@ -448,6 +448,14 @@ struct Query {
     /// The range of rows in which the query will be executed
     #[arg(long)]
     pub row_range: Option<String>,
+    /// The range of byte offsets in which the query will be executed. Only the matches that are fully contained within the provided
+    /// byte range will be returned.
+    #[arg(long)]
+    pub containing_byte_range: Option<String>,
+    /// The range of rows in which the query will be executed. Only the matches that are fully contained within the provided row range
+    /// will be returned.
+    #[arg(long)]
+    pub containing_row_range: Option<String>,
     /// Select a language by the scope instead of a file extension
     #[arg(long)]
     pub scope: Option<String>,
@@ -764,6 +772,14 @@ impl Init {
                     .map(|e| Some(e.trim().to_string()))
             };
 
+            let namespace = || {
+                Input::<String>::with_theme(&ColorfulTheme::default())
+                    .with_prompt("Package namespace")
+                    .default("io.github.tree-sitter".to_string())
+                    .allow_empty(true)
+                    .interact()
+            };
+
             let bindings = || {
                 let languages = Bindings::default().languages();
 
@@ -793,6 +809,7 @@ impl Init {
                 "author",
                 "email",
                 "url",
+                "namespace",
                 "bindings",
                 "exit",
             ];
@@ -813,6 +830,7 @@ impl Init {
                         "author" => opts.author = author()?,
                         "email" => opts.email = email()?,
                         "url" => opts.url = url()?,
+                        "namespace" => opts.namespace = Some(namespace()?),
                         "bindings" => opts.bindings = bindings()?,
                         "exit" => break,
                         _ => unreachable!(),
@@ -849,10 +867,26 @@ impl Init {
 
             (opts.name.clone(), Some(opts))
         } else {
-            let mut json = serde_json::from_str::<TreeSitterJSON>(
-                &fs::read_to_string(current_dir.join("tree-sitter.json"))
-                    .with_context(|| "Failed to read tree-sitter.json")?,
-            )?;
+            let old_config = fs::read_to_string(current_dir.join("tree-sitter.json"))
+                .with_context(|| "Failed to read tree-sitter.json")?;
+
+            let mut json = serde_json::from_str::<TreeSitterJSON>(&old_config)?;
+            if json.schema.is_none() {
+                json.schema = Some(TREE_SITTER_JSON_SCHEMA.to_string());
+            }
+
+            let new_config = format!("{}\n", serde_json::to_string_pretty(&json)?);
+            // Write the re-serialized config back, as newly added optional boolean fields
+            // will be included with explicit `false`s rather than implict `null`s
+            if self.update && !old_config.trim().eq(new_config.trim()) {
+                info!("Updating tree-sitter.json");
+                fs::write(
+                    current_dir.join("tree-sitter.json"),
+                    serde_json::to_string_pretty(&json)?,
+                )
+                .with_context(|| "Failed to write tree-sitter.json")?;
+            }
+
             (json.grammars.swap_remove(0).name, None)
         };
 
@@ -937,11 +971,21 @@ impl Build {
         } else {
             let output_path = if let Some(ref path) = self.output {
                 let path = Path::new(path);
-                if path.is_absolute() {
+                let full_path = if path.is_absolute() {
                     path.to_path_buf()
                 } else {
                     current_dir.join(path)
-                }
+                };
+                let parent_path = full_path
+                    .parent()
+                    .context("Output path must have a parent")?;
+                let name = full_path
+                    .file_name()
+                    .context("Ouput path must have a filename")?;
+                fs::create_dir_all(parent_path).context("Failed to create output path")?;
+                let mut canon_path = parent_path.canonicalize().context("Invalid output path")?;
+                canon_path.push(name);
+                canon_path
             } else {
                 let file_name = grammar_path
                     .file_stem()
@@ -966,7 +1010,7 @@ impl Build {
 
             loader
                 .compile_parser_at_path(&grammar_path, output_path, flags)
-                .unwrap();
+                .context("Failed to compile parser")?;
         }
         Ok(())
     }
@@ -1101,7 +1145,7 @@ impl Parse {
                     let path = Path::new(&path);
                     let language = loader
                         .select_language(
-                            path,
+                            Some(path),
                             current_dir,
                             self.scope.as_deref(),
                             lib_info.as_ref(),
@@ -1132,7 +1176,12 @@ impl Parse {
 
                 let language = if let Some(ref lib_path) = self.lib_path {
                     &loader
-                        .select_language(lib_path, current_dir, None, lib_info.as_ref())
+                        .select_language(
+                            None,
+                            current_dir,
+                            self.scope.as_deref(),
+                            lib_info.as_ref(),
+                        )
                         .with_context(|| {
                             anyhow!(
                                 "Failed to load language for path \"{}\"",
@@ -1166,8 +1215,12 @@ impl Parse {
 
                 let path = get_tmp_source_file(&contents)?;
                 let name = "stdin";
-                let language =
-                    loader.select_language(&path, current_dir, None, lib_info.as_ref())?;
+                let language = loader.select_language(
+                    None,
+                    current_dir,
+                    self.scope.as_deref(),
+                    lib_info.as_ref(),
+                )?;
 
                 parse::parse_file_at_path(
                     &mut parser,
@@ -1248,7 +1301,7 @@ impl Test {
             let lib_info =
                 get_lib_info(self.lib_path.as_ref(), self.lang_name.as_ref(), current_dir);
             &loader
-                .select_language(lib_path, current_dir, None, lib_info.as_ref())
+                .select_language(None, current_dir, None, lib_info.as_ref())
                 .with_context(|| {
                     anyhow!(
                         "Failed to load language for path \"{}\"",
@@ -1429,7 +1482,7 @@ impl Fuzz {
             let lang_name = lib_info.1.to_string();
             &(
                 loader
-                    .select_language(lib_path, current_dir, None, Some(&lib_info))
+                    .select_language(None, current_dir, None, Some(&lib_info))
                     .with_context(|| {
                         anyhow!(
                             "Failed to load language for path \"{}\"",
@@ -1474,18 +1527,11 @@ impl Query {
         loader.find_all_languages(&loader_config)?;
         let query_path = Path::new(&self.query_path);
 
-        let byte_range = self.byte_range.as_ref().and_then(|range| {
-            let mut parts = range.split(':');
-            let start = parts.next()?.parse().ok()?;
-            let end = parts.next().unwrap().parse().ok()?;
-            Some(start..end)
-        });
-        let point_range = self.row_range.as_ref().and_then(|range| {
-            let mut parts = range.split(':');
-            let start = parts.next()?.parse().ok()?;
-            let end = parts.next().unwrap().parse().ok()?;
-            Some(Point::new(start, 0)..Point::new(end, 0))
-        });
+        let byte_range = parse_range(&self.byte_range, |x| x)?;
+        let point_range = parse_range(&self.row_range, |row| Point::new(row, 0))?;
+        let containing_byte_range = parse_range(&self.containing_byte_range, |x| x)?;
+        let containing_point_range =
+            parse_range(&self.containing_row_range, |row| Point::new(row, 0))?;
 
         let cancellation_flag = util::cancel_on_signal();
 
@@ -1504,7 +1550,7 @@ impl Query {
         match input {
             CliInput::Paths(paths) => {
                 let language = loader.select_language(
-                    Path::new(&paths[0]),
+                    Some(Path::new(&paths[0])),
                     current_dir,
                     self.scope.as_deref(),
                     lib_info.as_ref(),
@@ -1514,6 +1560,8 @@ impl Query {
                     ordered_captures: self.captures,
                     byte_range,
                     point_range,
+                    containing_byte_range,
+                    containing_point_range,
                     quiet: self.quiet,
                     print_time: self.time,
                     stdin: false,
@@ -1538,7 +1586,7 @@ impl Query {
                 let languages = loader.languages_at_path(current_dir)?;
                 let language = if let Some(ref lib_path) = self.lib_path {
                     &loader
-                        .select_language(lib_path, current_dir, None, lib_info.as_ref())
+                        .select_language(None, current_dir, None, lib_info.as_ref())
                         .with_context(|| {
                             anyhow!(
                                 "Failed to load language for path \"{}\"",
@@ -1557,6 +1605,8 @@ impl Query {
                     ordered_captures: self.captures,
                     byte_range,
                     point_range,
+                    containing_byte_range,
+                    containing_point_range,
                     quiet: self.quiet,
                     print_time: self.time,
                     stdin: true,
@@ -1570,11 +1620,13 @@ impl Query {
 
                 let path = get_tmp_source_file(&contents)?;
                 let language =
-                    loader.select_language(&path, current_dir, None, lib_info.as_ref())?;
+                    loader.select_language(None, current_dir, None, lib_info.as_ref())?;
                 let opts = QueryFileOptions {
                     ordered_captures: self.captures,
                     byte_range,
                     point_range,
+                    containing_byte_range,
+                    containing_point_range,
                     quiet: self.quiet,
                     print_time: self.time,
                     stdin: true,
@@ -1596,6 +1648,7 @@ impl Highlight {
         let loader_config = config.get()?;
         loader.find_all_languages(&loader_config)?;
         loader.force_rebuild(self.rebuild || self.grammar_path.is_some());
+        let languages = loader.languages_at_path(current_dir)?;
 
         let cancellation_flag = util::cancel_on_signal();
 
@@ -1676,7 +1729,6 @@ impl Highlight {
             } => {
                 let path = get_tmp_source_file(&contents)?;
 
-                let languages = loader.languages_at_path(current_dir)?;
                 let language = languages
                     .iter()
                     .find(|(_, n)| language_names.contains(&Box::from(n.as_str())))
@@ -1707,7 +1759,6 @@ impl Highlight {
                     if let (Some(l), Some(lc)) = (language.clone(), language_configuration) {
                         (l, lc)
                     } else {
-                        let languages = loader.languages_at_path(current_dir)?;
                         let language = languages
                             .first()
                             .map(|(l, _)| l.clone())
@@ -2078,5 +2129,34 @@ fn get_lib_info<'a>(
         }
     } else {
         None
+    }
+}
+
+/// Parse a range string of the form "start:end" into an optional Range<T>.
+fn parse_range<T>(
+    range_str: &Option<String>,
+    make: impl Fn(usize) -> T,
+) -> Result<Option<std::ops::Range<T>>> {
+    if let Some(range) = range_str.as_ref() {
+        let err_msg = format!("Invalid range '{range}', expected 'start:end'");
+        let mut parts = range.split(':');
+
+        let Some(part) = parts.next() else {
+            Err(anyhow!(err_msg))?
+        };
+        let Ok(start) = part.parse::<usize>() else {
+            Err(anyhow!(err_msg))?
+        };
+
+        let Some(part) = parts.next() else {
+            Err(anyhow!(err_msg))?
+        };
+        let Ok(end) = part.parse::<usize>() else {
+            Err(anyhow!(err_msg))?
+        };
+
+        Ok(Some(make(start)..make(end)))
+    } else {
+        Ok(None)
     }
 }

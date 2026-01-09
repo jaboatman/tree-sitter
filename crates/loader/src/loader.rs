@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use std::{
     collections::HashMap,
     env, fs,
+    hash::{Hash as _, Hasher as _},
     io::{BufRead, BufReader},
     marker::PhantomData,
     mem,
@@ -40,6 +41,8 @@ use tree_sitter_tags::{Error as TagsError, TagsConfiguration};
 
 static GRAMMAR_NAME_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#""name":\s*"(.*?)""#).unwrap());
+
+const WASI_SDK_VERSION: &str = include_str!("../wasi-sdk-version").trim_ascii();
 
 pub type LoaderResult<T> = Result<T, LoaderError>;
 
@@ -223,7 +226,7 @@ impl std::fmt::Display for ScannerSymbolError {
 pub struct WasiSDKClangError {
     pub wasi_sdk_dir: String,
     pub possible_executables: Vec<&'static str>,
-    download: bool,
+    pub download: bool,
 }
 
 impl std::fmt::Display for WasiSDKClangError {
@@ -448,7 +451,6 @@ pub struct Links {
 pub struct Bindings {
     pub c: bool,
     pub go: bool,
-    #[serde(skip)]
     pub java: bool,
     #[serde(skip)]
     pub kotlin: bool,
@@ -462,12 +464,12 @@ pub struct Bindings {
 impl Bindings {
     /// return available languages and its default enabled state.
     #[must_use]
-    pub const fn languages(&self) -> [(&'static str, bool); 7] {
+    pub const fn languages(&self) -> [(&'static str, bool); 8] {
         [
             ("c", true),
             ("go", true),
-            // Comment out Java and Kotlin until the bindings are actually available.
-            // ("java", false),
+            ("java", false),
+            // Comment out Kotlin until the bindings are actually available.
             // ("kotlin", false),
             ("node", true),
             ("python", true),
@@ -498,8 +500,8 @@ impl Bindings {
             match v {
                 "c" => out.c = true,
                 "go" => out.go = true,
-                // Comment out Java and Kotlin until the bindings are actually available.
-                // "java" => out.java = true,
+                "java" => out.java = true,
+                // Comment out Kotlin until the bindings are actually available.
                 // "kotlin" => out.kotlin = true,
                 "node" => out.node = true,
                 "python" => out.python = true,
@@ -1024,20 +1026,26 @@ impl Loader {
             return Ok(wasm_store.load_language(&config.name, &wasm_bytes)?);
         }
 
+        // Create a unique lock path based on the output path hash to prevent
+        // interference when multiple processes build the same grammar (by name)
+        // to different output locations
+        let lock_hash = {
+            let mut hasher = std::hash::DefaultHasher::new();
+            output_path.hash(&mut hasher);
+            format!("{:x}", hasher.finish())
+        };
+
         let lock_path = if env::var("CROSS_RUNNER").is_ok() {
             tempfile::tempdir()
-                .unwrap()
+                .expect("create a temp dir")
                 .path()
-                .join("tree-sitter")
-                .join("lock")
-                .join(format!("{}.lock", config.name))
+                .to_path_buf()
         } else {
-            etcetera::choose_base_strategy()?
-                .cache_dir()
-                .join("tree-sitter")
-                .join("lock")
-                .join(format!("{}.lock", config.name))
-        };
+            etcetera::choose_base_strategy()?.cache_dir()
+        }
+        .join("tree-sitter")
+        .join("lock")
+        .join(format!("{}-{lock_hash}.lock", config.name));
 
         if let Ok(lock_file) = fs::OpenOptions::new().write(true).open(&lock_path) {
             recompile = false;
@@ -1086,6 +1094,26 @@ impl Loader {
             if config.scanner_path.is_some() {
                 self.check_external_scanner(&config.name, &output_path)?;
             }
+        }
+
+        // Ensure the dynamic library exists before trying to load it. This can
+        // happen in race conditions where we couldn't acquire the lock because
+        // another process was compiling but it still hasn't finished by the
+        // time we reach this point, so the output file still doesn't exist.
+        //
+        // Instead of allowing the `load_language` call below to fail, return a
+        // clearer error to the user here.
+        if !output_path.exists() {
+            let msg = format!(
+                "Dynamic library `{}` not found after build attempt. \
+                Are you running multiple processes building to the same output location?",
+                output_path.display()
+            );
+
+            Err(LoaderError::IO(IoError::new(
+                std::io::Error::new(std::io::ErrorKind::NotFound, msg),
+                Some(output_path.as_path()),
+            )))?;
         }
 
         Self::load_language(&output_path, &language_fn_name)
@@ -1436,9 +1464,12 @@ impl Loader {
             return Err(LoaderError::WasiSDKPlatform);
         };
 
-        let sdk_filename = format!("wasi-sdk-29.0-{arch_os}.tar.gz");
+        let sdk_filename = format!("wasi-sdk-{WASI_SDK_VERSION}-{arch_os}.tar.gz");
+        let wasi_sdk_major_version = WASI_SDK_VERSION
+            .trim_end_matches(char::is_numeric) // trim minor version...
+            .trim_end_matches('.'); // ...and '.' separator
         let sdk_url = format!(
-            "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-29/{sdk_filename}",
+            "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-{wasi_sdk_major_version}/{sdk_filename}",
         );
 
         info!("Downloading wasi-sdk from {sdk_url}...");
@@ -1697,7 +1728,7 @@ impl Loader {
 
     pub fn select_language(
         &mut self,
-        path: &Path,
+        path: Option<&Path>,
         current_dir: &Path,
         scope: Option<&str>,
         // path to dynamic library, name of language
@@ -1715,7 +1746,7 @@ impl Loader {
             } else {
                 Err(LoaderError::UnknownScope(scope.to_string()))
             }
-        } else if let Some((lang, _)) =
+        } else if let Some((lang, _)) = if let Some(path) = path {
             self.language_configuration_for_file_name(path)
                 .map_err(|e| {
                     LoaderError::FileNameLoad(
@@ -1723,7 +1754,9 @@ impl Loader {
                         Box::new(e),
                     )
                 })?
-        {
+        } else {
+            None
+        } {
             Ok(lang)
         } else if let Some(id) = self.language_configuration_in_current_path {
             Ok(self.language_for_id(self.language_configurations[id].language_id)?)
@@ -1734,7 +1767,11 @@ impl Loader {
             .cloned()
         {
             Ok(lang.0)
-        } else if let Some(lang) = self.language_configuration_for_first_line_regex(path)? {
+        } else if let Some(lang) = if let Some(path) = path {
+            self.language_configuration_for_first_line_regex(path)?
+        } else {
+            None
+        } {
             Ok(lang.0)
         } else {
             Err(LoaderError::NoLanguage)
