@@ -33,7 +33,8 @@ if(MSVC)
 else()
   target_compile_options(tree-sitter PRIVATE
                          -Wall -Wextra -Wshadow -Wpedantic
-                         -Werror=incompatible-pointer-types)
+                         -Werror=incompatible-pointer-types
+                         -Werror=strict-aliasing -Wstrict-aliasing=2)
 endif()
 
 if(TREE_SITTER_FEATURE_WASM)
@@ -81,7 +82,7 @@ set_target_properties(tree-sitter
                       SOVERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}"
                       DEFINE_SYMBOL "")
 
-target_compile_definitions(tree-sitter PRIVATE _POSIX_C_SOURCE=200112L _DEFAULT_SOURCE _DARWIN_C_SOURCE)
+target_compile_definitions(tree-sitter PRIVATE _POSIX_C_SOURCE=200112L _DEFAULT_SOURCE _BSD_SOURCE _DARWIN_C_SOURCE)
 
 include(GNUInstallDirs)
 

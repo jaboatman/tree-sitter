@@ -66,9 +66,13 @@ fn test_parsing_with_logging() {
     parser.set_language(&get_language("rust")).unwrap();
 
     let mut messages = Vec::new();
-    parser.set_logger(Some(Box::new(|log_type, message| {
-        messages.push((log_type, message.to_string()));
-    })));
+    // SAFETY: the logger borrows `messages` and is only invoked during the
+    // `parse` call below while `messages` is in scope.
+    unsafe {
+        parser.set_logger_unchecked(Some(Box::new(|log_type, message| {
+            messages.push((log_type, message.to_string()));
+        })));
+    }
 
     parser
         .parse(
@@ -247,6 +251,64 @@ fn test_parsing_with_custom_utf16_be_input() {
     assert_eq!(root.kind(), "source_file");
     assert!(!root.has_error());
     assert_eq!(root.child(0).unwrap().kind(), "function_item");
+}
+
+#[test]
+fn test_utf16_decode_does_not_read_oob() {
+    // Test for a buffer over-read in ts_decode_utf16_le/be when a lead surrogate
+    // is the last code unit in a chunk. The test grammar's external scanner
+    // distinguishes surrogate code points from supplementary-plane characters,
+    // making the over-read directly observable in the parse tree.
+    //
+    // Buffer layout:
+    //   buf[0] = 0xD83E  (lead surrogate)
+    //   buf[1] = 0xDD8B  (POISON: fake trail surrogate, adjacent in memory)
+    //
+    // The callback returns only buf[0..1] (one code unit = 2 bytes).
+    //
+    // When functioning correctly, this test passes a length of 2 bytes, which is
+    // interpreted as 2/2 = 1 code unit, and thus doesn't over-read into the "poison"
+    // fake trail surrogate. If an over-read does occur, the scanner sees a
+    // supplementary token.
+    let mut parser = Parser::new();
+    let language = get_test_fixture_language("utf16_surrogate_oob");
+    parser.set_language(&language).unwrap();
+
+    let buf = vec![
+        0xD83E, // lead surrogate (the only "visible" code unit)
+        0xDD8B, // POISON: adjacent in Vec memory, past the chunk
+    ];
+    assert_eq!("🦋", String::from_utf16(&buf).unwrap());
+
+    let mut callback = |offset: usize, _position: Point| -> &[u16] {
+        // only expose buf[0], never buf[1]
+        if offset >= 1 {
+            return [].as_slice();
+        }
+        &buf[0..1]
+    };
+
+    // Use the parse function matching the host endianness, since the
+    // buffer contains native u16 values.
+    #[cfg(target_endian = "little")]
+    let tree = parser
+        .parse_utf16_le_with_options(&mut callback, None, None)
+        .unwrap();
+    #[cfg(target_endian = "big")]
+    let tree = parser
+        .parse_utf16_be_with_options(&mut callback, None, None)
+        .unwrap();
+
+    let root = tree.root_node();
+
+    // Correct: scanner sees raw surrogate (0xD83E) -> `surrogate` node
+    // Incorrect: scanner sees supplementary (U+1F98B, aka 🦋) -> `supplementary` node
+    assert_eq!(
+        root.to_sexp(),
+        "(program (surrogate))",
+        "buffer over-read: decoder read past chunk boundary and formed a \
+         supplementary character from OOB adjacent memory"
+    );
 }
 
 #[test]
@@ -745,11 +807,7 @@ fn test_parsing_cancelled_by_another_thread() {
         &mut |offset, _| {
             thread::yield_now();
             thread::sleep(time::Duration::from_millis(10));
-            if offset == 0 {
-                b" ["
-            } else {
-                b"0,"
-            }
+            if offset == 0 { b" [" } else { b"0," }
         },
         None,
         Some(ParseOptions::new().progress_callback(callback)),
@@ -772,11 +830,7 @@ fn test_parsing_with_a_timeout() {
     let start_time = time::Instant::now();
     let tree = parser.parse_with_options(
         &mut |offset, _| {
-            if offset == 0 {
-                b" ["
-            } else {
-                b",0"
-            }
+            if offset == 0 { b" [" } else { b",0" }
         },
         None,
         Some(ParseOptions::new().progress_callback(&mut |_| {
@@ -794,11 +848,7 @@ fn test_parsing_with_a_timeout() {
     let start_time = time::Instant::now();
     let tree = parser.parse_with_options(
         &mut |offset, _| {
-            if offset == 0 {
-                b" ["
-            } else {
-                b",0"
-            }
+            if offset == 0 { b" [" } else { b",0" }
         },
         None,
         Some(ParseOptions::new().progress_callback(&mut |_| {
@@ -995,9 +1045,9 @@ fn test_parsing_with_timeout_during_balancing() {
         let mut parser = Parser::new();
         parser.set_language(&get_language("javascript")).unwrap();
 
-        let function_count = 100;
+        let function_count: u32 = 100;
 
-        let code = "function() {}\n".repeat(function_count);
+        let code = "function() {}\n".repeat(function_count as usize);
         let mut current_byte_offset = 0;
         let mut in_balancing = false;
         let tree = parser.parse_with_options(
@@ -1071,7 +1121,7 @@ fn test_parsing_with_timeout_during_balancing() {
                 Some(ParseOptions::new().progress_callback(&mut |state| {
                     // Because we've already finished parsing, we should only be resuming the
                     // balancing phase.
-                    assert!(state.current_byte_offset() == current_byte_offset);
+                    assert_eq!(state.current_byte_offset(), current_byte_offset);
                     ControlFlow::Continue(())
                 })),
             )
@@ -1739,11 +1789,15 @@ fn test_parsing_with_scanner_logging() {
         .unwrap();
 
     let mut found = false;
-    parser.set_logger(Some(Box::new(|log_type, message| {
-        if log_type == LogType::Lex && message == "Found a percent string" {
-            found = true;
-        }
-    })));
+    // SAFETY: the logger borrows `found` and is only invoked during the `parse`
+    // call below, while `found` is in scope.
+    unsafe {
+        parser.set_logger_unchecked(Some(Box::new(|log_type, message| {
+            if log_type == LogType::Lex && message == "Found a percent string" {
+                found = true;
+            }
+        })));
+    }
 
     let source_code = "x + %(sup (external) scanner?)";
 
@@ -1863,7 +1917,7 @@ fn test_decode_cp1252() {
         fn decode(bytes: &[u8]) -> (i32, u32) {
             if !bytes.is_empty() {
                 let byte = bytes[0];
-                (byte as i32, 1)
+                (i32::from(byte), 1)
             } else {
                 (0, 0)
             }
@@ -1899,7 +1953,7 @@ fn test_decode_macintosh() {
         fn decode(bytes: &[u8]) -> (i32, u32) {
             if !bytes.is_empty() {
                 let byte = bytes[0];
-                (byte as i32, 1)
+                (i32::from(byte), 1)
             } else {
                 (0, 0)
             }
@@ -1961,8 +2015,9 @@ fn test_decode_utf24le() {
 
 #[test]
 fn test_grammars_that_should_not_compile() {
-    assert!(generate_parser(
-        r#"
+    assert!(
+        generate_parser(
+            r#"
         {
             "name": "issue_1111",
             "rules": {
@@ -1970,11 +2025,13 @@ fn test_grammars_that_should_not_compile() {
             },
         }
         "#
-    )
-    .is_err());
+        )
+        .is_err()
+    );
 
-    assert!(generate_parser(
-        r#"
+    assert!(
+        generate_parser(
+            r#"
         {
             "name": "issue_1271",
             "rules": {
@@ -1989,11 +2046,13 @@ fn test_grammars_that_should_not_compile() {
             },
         }
         "#
-    )
-    .is_err());
+        )
+        .is_err()
+    );
 
-    assert!(generate_parser(
-        r#"
+    assert!(
+        generate_parser(
+            r#"
         {
             "name": "issue_1156_expl_1",
             "rules": {
@@ -2007,11 +2066,13 @@ fn test_grammars_that_should_not_compile() {
             },
         }
         "#
-    )
-    .is_err());
+        )
+        .is_err()
+    );
 
-    assert!(generate_parser(
-        r#"
+    assert!(
+        generate_parser(
+            r#"
         {
             "name": "issue_1156_expl_2",
             "rules": {
@@ -2028,11 +2089,13 @@ fn test_grammars_that_should_not_compile() {
             },
         }
         "#
-    )
-    .is_err());
+        )
+        .is_err()
+    );
 
-    assert!(generate_parser(
-        r#"
+    assert!(
+        generate_parser(
+            r#"
         {
             "name": "issue_1156_expl_3",
             "rules": {
@@ -2046,11 +2109,13 @@ fn test_grammars_that_should_not_compile() {
             },
         }
         "#
-    )
-    .is_err());
+        )
+        .is_err()
+    );
 
-    assert!(generate_parser(
-        r#"
+    assert!(
+        generate_parser(
+            r#"
         {
             "name": "issue_1156_expl_4",
             "rules": {
@@ -2067,8 +2132,9 @@ fn test_grammars_that_should_not_compile() {
             },
         }
         "#
-    )
-    .is_err());
+        )
+        .is_err()
+    );
 }
 
 const fn simple_range(start: usize, end: usize) -> Range {

@@ -1,14 +1,14 @@
 use std::{
-    collections::HashMap,
     path::{Path, PathBuf},
     sync::{LazyLock, Mutex},
 };
 
 use log::{error, info, warn};
 use rquickjs::{
-    loader::{FileResolver, ScriptLoader},
     Context, Ctx, Function, Module, Object, Runtime, Type, Value,
+    loader::{FileResolver, ScriptLoader},
 };
+use rustc_hash::FxHashMap;
 
 use super::{IoError, JSError, JSResult};
 
@@ -49,8 +49,8 @@ fn format_js_exception(v: Value) -> JSError {
     }
 }
 
-static FILE_CACHE: LazyLock<Mutex<HashMap<String, String>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static FILE_CACHE: LazyLock<Mutex<FxHashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(FxHashMap::default()));
 
 #[rquickjs::function]
 fn load_file(path: String) -> rquickjs::Result<String> {
@@ -100,7 +100,7 @@ impl Console {
                         .as_array()
                         .unwrap()
                         .iter::<Value<'_>>()
-                        .filter_map(|x| x.ok())
+                        .filter_map(std::result::Result::ok)
                         .map(|x| {
                             if x.is_string() {
                                 format!("'{}'", Self::format_args(&[x]))
@@ -128,24 +128,40 @@ impl Console {
 
 #[rquickjs::methods]
 impl Console {
+    #[must_use]
     #[qjs(constructor)]
     pub const fn new() -> Self {
         Console {}
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        reason = "signature required by rquickjs"
+    )]
     pub fn log(&self, args: rquickjs::function::Rest<Value<'_>>) -> rquickjs::Result<()> {
         info!("{}", Self::format_args(&args));
         Ok(())
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        reason = "signature required by rquickjs"
+    )]
     pub fn warn(&self, args: rquickjs::function::Rest<Value<'_>>) -> rquickjs::Result<()> {
         warn!("{}", Self::format_args(&args));
         Ok(())
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(
+        clippy::needless_pass_by_value,
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        reason = "signature required by rquickjs"
+    )]
     pub fn error(&self, args: rquickjs::function::Rest<Value<'_>>) -> rquickjs::Result<()> {
         error!("Error: {}", Self::format_args(&args));
         Ok(())
@@ -214,15 +230,18 @@ fn try_resolve_path(path: &Path) -> rquickjs::Result<PathBuf> {
     ))
 }
 
-#[allow(clippy::needless_pass_by_value)]
-fn require_from_module<'a>(
-    ctx: Ctx<'a>,
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "signature required by rquickjs"
+)]
+fn require_from_module<'js>(
+    ctx: Ctx<'js>,
     module_path: String,
     from_module: &str,
-) -> rquickjs::Result<Value<'a>> {
+) -> rquickjs::Result<Value<'js>> {
     let current_module = PathBuf::from(from_module);
     let current_dir = if current_module.is_file() {
-        current_module.parent().unwrap_or(Path::new("."))
+        current_module.parent().unwrap_or_else(|| Path::new("."))
     } else {
         current_module.as_path()
     };
@@ -234,13 +253,13 @@ fn require_from_module<'a>(
     load_module_from_content(&ctx, &resolved_path, &contents)
 }
 
-fn load_module_from_content<'a>(
-    ctx: &Ctx<'a>,
+fn load_module_from_content<'js>(
+    ctx: &Ctx<'js>,
     path: &Path,
     contents: &str,
-) -> rquickjs::Result<Value<'a>> {
+) -> rquickjs::Result<Value<'js>> {
     if path.extension().is_some_and(|ext| ext == "json") {
-        return ctx.eval::<Value, _>(format!("JSON.parse({contents:?})"));
+        return ctx.eval::<Value<'js>, _>(format!("JSON.parse({contents:?})"));
     }
 
     let exports = Object::new(ctx.clone())?;
@@ -256,7 +275,7 @@ fn load_module_from_content<'a>(
     let module_path = filename.clone();
     let require = Function::new(
         ctx.clone(),
-        move |ctx_inner: Ctx<'a>, target_path: String| -> rquickjs::Result<Value<'a>> {
+        move |ctx_inner: Ctx<'js>, target_path: String| -> rquickjs::Result<Value<'js>> {
             require_from_module(ctx_inner, target_path, &module_path)
         },
     )?;
@@ -264,8 +283,8 @@ fn load_module_from_content<'a>(
     let wrapper =
         format!("(function(exports, require, module, __filename, __dirname) {{ {contents} }})");
 
-    let module_func = ctx.eval::<Function, _>(wrapper)?;
-    module_func.call::<_, Value>((exports, require, module_obj.clone(), filename, dirname))?;
+    let module_func = ctx.eval::<Function<'js>, _>(wrapper)?;
+    module_func.call::<_, Value<'js>>((exports, require, module_obj.clone(), filename, dirname))?;
 
     module_obj.get("exports")
 }
@@ -285,7 +304,7 @@ pub fn execute_native_runtime(grammar_path: &Path) -> JSResult<String> {
     let loader = ScriptLoader::default().with_extension("mjs");
     runtime.set_loader(resolver, loader);
 
-    let cwd = std::env::current_dir().map_err(|e| JSError::IO(IoError::new(&e, None)))?;
+    let cwd = std::env::current_dir().map_err(|e| JSError::IO(IoError::new(e, None)))?;
     let relative_path = pathdiff::diff_paths(grammar_path, &cwd)
         .map(|p| p.to_string_lossy().to_string())
         .ok_or(JSError::RelativePath)?;

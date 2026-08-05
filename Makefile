@@ -22,9 +22,9 @@ OBJ := $(SRC:.c=.o)
 
 # define default flags, and override to append mandatory flags
 ARFLAGS := rcs
-CFLAGS ?= -O3 -Wall -Wextra -Wshadow -Wpedantic -Werror=incompatible-pointer-types
+CFLAGS ?= -O3 -Wall -Wextra -Wshadow -Wpedantic -Werror=incompatible-pointer-types -Werror=strict-aliasing -Wstrict-aliasing=2
 override CFLAGS += -std=c11 -fPIC -fvisibility=hidden
-override CFLAGS += -D_POSIX_C_SOURCE=200112L -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE
+override CFLAGS += -D_POSIX_C_SOURCE=200112L -D_DEFAULT_SOURCE -D_BSD_SOURCE -D_DARWIN_C_SOURCE
 override CFLAGS += -Ilib/src -Ilib/src/wasm -Ilib/include
 
 # ABI versioning
@@ -122,7 +122,6 @@ test-wasm:
 
 lint:
 	cargo update --workspace --locked --quiet
-	cargo check --workspace --all-targets
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
 

@@ -144,7 +144,7 @@ impl Version {
         }
     }
 
-    fn update_file_with<F>(&self, path: &PathBuf, update_fn: F) -> Result<(), UpdateError>
+    fn update_file_with<F>(path: &PathBuf, update_fn: F) -> Result<(), UpdateError>
     where
         F: Fn(&str) -> String,
     {
@@ -155,7 +155,7 @@ impl Version {
 
     fn update_treesitter_json(&self) -> Result<(), UpdateError> {
         let json_path = self.current_dir.join("tree-sitter.json");
-        self.update_file_with(&json_path, |content| {
+        Self::update_file_with(&json_path, |content| {
             content
                 .lines()
                 .map(|line| {
@@ -189,7 +189,7 @@ impl Version {
             return Ok(());
         }
 
-        self.update_file_with(&cargo_toml_path, |content| {
+        Self::update_file_with(&cargo_toml_path, |content| {
             content
                 .lines()
                 .map(|line| {
@@ -236,7 +236,7 @@ impl Version {
             return Ok(());
         }
 
-        self.update_file_with(&package_json_path, |content| {
+        Self::update_file_with(&package_json_path, |content| {
             content
                 .lines()
                 .map(|line| {
@@ -292,8 +292,11 @@ impl Version {
         } else {
             self.current_dir.join("Makefile")
         };
+        if !makefile_path.exists() {
+            return Ok(());
+        }
 
-        self.update_file_with(&makefile_path, |content| {
+        Self::update_file_with(&makefile_path, |content| {
             content
                 .lines()
                 .map(|line| {
@@ -317,7 +320,7 @@ impl Version {
             return Ok(());
         }
 
-        self.update_file_with(&cmake_lists_path, |content| {
+        Self::update_file_with(&cmake_lists_path, |content| {
             let re = Regex::new(r#"(\s*VERSION\s+)"[0-9]+\.[0-9]+\.[0-9]+""#)
                 .expect("Failed to compile regex");
             re.replace(
@@ -336,7 +339,7 @@ impl Version {
             return Ok(());
         }
 
-        self.update_file_with(&pyproject_toml_path, |content| {
+        Self::update_file_with(&pyproject_toml_path, |content| {
             content
                 .lines()
                 .map(|line| {
@@ -360,7 +363,7 @@ impl Version {
             return Ok(());
         }
 
-        self.update_file_with(&zig_zon_path, |content| {
+        Self::update_file_with(&zig_zon_path, |content| {
             let zig_version_prefix = ".version =";
             content
                 .lines()

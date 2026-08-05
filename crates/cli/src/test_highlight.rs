@@ -1,22 +1,22 @@
 use std::{fs, path::Path};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use tree_sitter::Point;
 use tree_sitter_highlight::{Highlight, HighlightConfiguration, HighlightEvent, Highlighter};
 use tree_sitter_loader::{Config, Loader};
 
 use crate::{
-    query_testing::{parse_position_comments, to_utf8_point, Assertion, Utf8Point},
+    query_testing::{Assertion, Utf8Point, parse_position_comments, to_utf8_point},
     test::{TestInfo, TestOutcome, TestResult, TestSummary},
     util,
 };
 
 #[derive(Debug)]
 pub struct Failure {
-    row: usize,
-    column: usize,
-    expected_highlight: String,
-    actual_highlights: Vec<String>,
+    pub(crate) row: usize,
+    pub(crate) column: usize,
+    pub(crate) expected_highlight: String,
+    pub(crate) actual_highlights: Vec<String>,
 }
 
 impl std::error::Error for Failure {}
@@ -120,12 +120,9 @@ pub fn test_highlights(
         }
     }
 
-    if failed {
-        Err(anyhow!(""))
-    } else {
-        Ok(())
-    }
+    if failed { Err(anyhow!("")) } else { Ok(()) }
 }
+
 pub fn iterate_assertions(
     assertions: &[Assertion],
     highlights: &[(Utf8Point, Utf8Point, Highlight)],
@@ -142,49 +139,48 @@ pub fn iterate_assertions(
         expected_capture_name: expected_highlight,
     } in assertions
     {
-        let mut passed = false;
-        let mut end_column = position.column + length - 1;
+        // Iterate through all of the highlights that start at or before this assertion's
+        // position, looking for one that matches the assertion.
         actual_highlights.clear();
-
-        // The assertions are ordered by position, so skip past all of the highlights that
-        // end at or before this assertion's position.
-        'highlight_loop: while let Some(highlight) = highlights.get(i) {
+        let mut passed = false;
+        let end_column = position.column + length - 1;
+        for highlight in &highlights[i..] {
+            // The assertions are ordered by position, so skip past all of the highlights that
+            // end at or before this assertion's position.
             if highlight.1 <= *position {
                 i += 1;
                 continue;
             }
+            if (highlight.0.row > position.row)
+                || (highlight.0.row == position.row && highlight.0.column > end_column)
+            {
+                break;
+            }
 
-            // Iterate through all of the highlights that start at or before this assertion's
-            // position, looking for one that matches the assertion.
-            let mut j = i;
-            while let (false, Some(highlight)) = (passed, highlights.get(j)) {
-                end_column = position.column + length - 1;
-                if highlight.0.row >= position.row && highlight.0.column > end_column {
-                    break 'highlight_loop;
-                }
-
-                // If the highlight matches the assertion, or if the highlight doesn't
-                // match the assertion but it's negative, this test passes. Otherwise,
-                // add this highlight to the list of actual highlights that span the
-                // assertion's position, in order to generate an error message in the event
-                // of a failure.
-                let highlight_name = &highlight_names[(highlight.2).0];
-                if (*highlight_name == *expected_highlight) == *negative {
-                    actual_highlights.push(highlight_name);
-                } else {
-                    passed = true;
-                    break 'highlight_loop;
-                }
-
-                j += 1;
+            // If the highlight matches the assertion, or if the highlight doesn't
+            // match the assertion but it's negative, this test passes. Otherwise,
+            // add this highlight to the list of actual highlights that span the
+            // assertion's position, in order to generate an error message in the event
+            // of a failure.
+            let highlight_name = &highlight_names[(highlight.2).0];
+            if (*highlight_name == *expected_highlight) == *negative {
+                actual_highlights.push(highlight_name);
+            } else {
+                passed = true;
+                break;
             }
         }
 
         if !passed {
+            let mut expected = String::with_capacity(expected_highlight.len() + 1);
+            if *negative {
+                expected.push('!');
+            }
+            expected.push_str(expected_highlight);
             return Err(Failure {
                 row: position.row,
                 column: end_column,
-                expected_highlight: expected_highlight.clone(),
+                expected_highlight: expected,
                 actual_highlights: actual_highlights.into_iter().cloned().collect(),
             }
             .into());
@@ -223,9 +219,11 @@ pub fn get_highlight_positions(
     let mut highlight_stack = Vec::new();
     let source = String::from_utf8_lossy(source);
     let mut char_indices = source.char_indices();
-    for event in highlighter.highlight(highlight_config, source.as_bytes(), None, |string| {
-        loader.highlight_config_for_injection_string(string)
-    })? {
+    for event in
+        highlighter.highlight(highlight_config, source.as_bytes(), None, None, |string| {
+            loader.highlight_config_for_injection_string(string)
+        })?
+    {
         match event? {
             HighlightEvent::HighlightStart(h) => highlight_stack.push(h),
             HighlightEvent::HighlightEnd => {

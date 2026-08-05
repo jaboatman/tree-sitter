@@ -22,10 +22,10 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -44,22 +44,26 @@ jobs:
 
           for platform in $(cd artifacts; ls | sed 's/^tree-sitter\.//'); do
             exe=$(ls artifacts/tree-sitter.$platform/tree-sitter*)
+            chmod +x $exe
             gzip --stdout --name $exe > target/tree-sitter-$platform.gz
+            zip -j9 target/tree-sitter-cli-$platform.zip $exe
           done
           rm -rf artifacts
           ls -l target/
 
       - name: Generate attestations
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             target/tree-sitter-*.gz
+            target/tree-sitter-cli-*.zip
             target/web-tree-sitter.tar.gz
 
       - name: Create release
         run: |-
           gh release create $GITHUB_REF_NAME \
             target/tree-sitter-*.gz \
+            target/tree-sitter-cli-*.zip \
             target/web-tree-sitter.tar.gz
         env:
           GH_TOKEN: ${{ github.token }}
@@ -74,7 +78,7 @@ jobs:
     needs: release
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -102,10 +106,10 @@ jobs:
         directory: [crates/cli/npm, lib/binding_web]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7.0.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org

@@ -39,8 +39,8 @@ It only shows the *named* nodes, as described in [this section][named-vs-anonymo
 ```
 
   The expected output section can also *optionally* show the [*field names*][node-field-names] associated with each child
-  node. To include field names in your tests, you write a node's field name followed by a colon, before the node itself in
-  the S-expression:
+  node. To include field names in your tests, you write a node's field name followed by a colon, before the node itself
+  in the S-expression:
 
 ```query
 (source_file
@@ -71,6 +71,28 @@ increment(n) == n + 1
     (operator (identifier)
       (parameter_list (identifier))
       (plus (identifier_ref) (number)))))
+```
+
+* If your input contains `---` lines (e.g. YAML document separators, Markdown thematic breaks), the **longest** matching
+`---` line is used as the divider between input and expected output. This means you can use a longer divider line to
+avoid ambiguity:
+
+```text
+==================
+YAML document test
+==================
+
+---
+key: value
+
+------
+
+(stream
+  (document
+    (block_mapping
+      (block_mapping_pair
+        key: (flow_node (plain_scalar))
+        value: (flow_node (plain_scalar))))))
 ```
 
 These tests are important. They serve as the parser's API documentation, and they can be run every time you change the grammar
@@ -104,8 +126,8 @@ you can repeat the attribute on a new line.
 
 The following attributes are available:
 
-* `:cst` - This attribute specifies that the expected output should be in the form of a CST instead of the normal S-expression. This
-CST matches the format given by `parse --cst`.
+* `:cst` - This attribute specifies that the expected output should be in the form of a CST instead of the normal S-expression.
+This CST matches the format given by `parse --cst`.
 * `:error` — This attribute will assert that the parse tree contains an error. It's useful to just validate that a certain
 input is invalid without displaying the whole parse tree, as such you should omit the parse tree below the `---` line.
 * `:fail-fast` — This attribute will stop the testing of additional cases if the test marked with this attribute fails.

@@ -8,7 +8,7 @@ mod process_inlines;
 
 use std::{
     cmp::Ordering,
-    collections::{hash_map, BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, hash_map},
     mem,
 };
 
@@ -18,7 +18,8 @@ pub use flatten_grammar::FlattenGrammarError;
 use indexmap::IndexMap;
 pub use intern_symbols::InternSymbolsError;
 pub use process_inlines::ProcessInlinesError;
-use serde::Serialize;
+use rustc_hash::{FxHashMap, FxHashSet};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use self::expand_tokens::expand_tokens;
@@ -34,7 +35,7 @@ use super::{
     },
     rules::{AliasMap, Precedence, Rule, Symbol},
 };
-use crate::grammars::ReservedWordContext;
+use crate::{Diagnostic, grammars::ReservedWordContext};
 
 pub struct IntermediateGrammar<T, U> {
     variables: Vec<Variable>,
@@ -76,7 +77,7 @@ impl<T, U> Default for IntermediateGrammar<T, U> {
 
 pub type PrepareGrammarResult<T> = Result<T, PrepareGrammarError>;
 
-#[derive(Debug, Error, Serialize)]
+#[derive(Debug, Error, Serialize, Deserialize)]
 #[error(transparent)]
 pub enum PrepareGrammarError {
     ValidatePrecedences(#[from] ValidatePrecedenceError),
@@ -90,14 +91,14 @@ pub enum PrepareGrammarError {
 
 pub type ValidatePrecedenceResult<T> = Result<T, ValidatePrecedenceError>;
 
-#[derive(Debug, Error, Serialize)]
+#[derive(Debug, Error, Serialize, Deserialize)]
 #[error(transparent)]
 pub enum ValidatePrecedenceError {
     Undeclared(#[from] UndeclaredPrecedenceError),
     Ordering(#[from] ConflictingPrecedenceOrderingError),
 }
 
-#[derive(Debug, Error, Serialize)]
+#[derive(Debug, Error, Serialize, Deserialize)]
 pub struct IndirectRecursionError(pub Vec<String>);
 
 impl std::fmt::Display for IndirectRecursionError {
@@ -113,7 +114,7 @@ impl std::fmt::Display for IndirectRecursionError {
     }
 }
 
-#[derive(Debug, Error, Serialize)]
+#[derive(Debug, Error, Serialize, Deserialize)]
 pub struct UndeclaredPrecedenceError {
     pub precedence: String,
     pub rule: String,
@@ -130,7 +131,7 @@ impl std::fmt::Display for UndeclaredPrecedenceError {
     }
 }
 
-#[derive(Debug, Error, Serialize)]
+#[derive(Debug, Error, Serialize, Deserialize)]
 pub struct ConflictingPrecedenceOrderingError {
     pub precedence_1: String,
     pub precedence_2: String,
@@ -151,6 +152,7 @@ impl std::fmt::Display for ConflictingPrecedenceOrderingError {
 /// for parse table construction.
 pub fn prepare_grammar(
     input_grammar: &InputGrammar,
+    diagnostics: &mut Vec<Diagnostic>,
 ) -> PrepareGrammarResult<(
     SyntaxGrammar,
     LexicalGrammar,
@@ -160,7 +162,7 @@ pub fn prepare_grammar(
     validate_precedences(input_grammar)?;
     validate_indirect_recursion(input_grammar)?;
 
-    let interned_grammar = intern_symbols(input_grammar)?;
+    let interned_grammar = intern_symbols(input_grammar, diagnostics)?;
     let (syntax_grammar, lexical_grammar) = extract_tokens(interned_grammar)?;
     let syntax_grammar = expand_repeats(syntax_grammar);
     let mut syntax_grammar = flatten_grammar(syntax_grammar)?;
@@ -256,7 +258,7 @@ fn validate_precedences(grammar: &InputGrammar) -> ValidatePrecedenceResult<()> 
     fn validate(
         rule_name: &str,
         rule: &Rule,
-        names: &HashSet<&String>,
+        names: &FxHashSet<&String>,
     ) -> ValidatePrecedenceResult<()> {
         match rule {
             Rule::Repeat(rule) => validate(rule_name, rule, names),
@@ -264,13 +266,13 @@ fn validate_precedences(grammar: &InputGrammar) -> ValidatePrecedenceResult<()> 
                 .iter()
                 .try_for_each(|e| validate(rule_name, e, names)),
             Rule::Metadata { rule, params } => {
-                if let Precedence::Name(n) = &params.precedence {
-                    if !names.contains(n) {
-                        Err(UndeclaredPrecedenceError {
-                            precedence: n.clone(),
-                            rule: rule_name.to_string(),
-                        })?;
-                    }
+                if let Precedence::Name(n) = &params.precedence
+                    && !names.contains(n)
+                {
+                    Err(UndeclaredPrecedenceError {
+                        precedence: n.clone(),
+                        rule: rule_name.to_string(),
+                    })?;
                 }
                 validate(rule_name, rule, names)?;
                 Ok(())
@@ -281,7 +283,7 @@ fn validate_precedences(grammar: &InputGrammar) -> ValidatePrecedenceResult<()> 
 
     // For any two precedence names `a` and `b`, if `a` comes before `b`
     // in some list, then it cannot come *after* `b` in any list.
-    let mut pairs = HashMap::new();
+    let mut pairs = FxHashMap::default();
     for list in &grammar.precedence_orderings {
         for (i, mut entry1) in list.iter().enumerate() {
             for mut entry2 in list.iter().skip(i + 1) {
@@ -321,7 +323,7 @@ fn validate_precedences(grammar: &InputGrammar) -> ValidatePrecedenceResult<()> 
                 None
             }
         })
-        .collect::<HashSet<&String>>();
+        .collect::<FxHashSet<&String>>();
     for variable in &grammar.variables {
         validate(&variable.name, &variable.rule, &precedence_names)?;
     }
